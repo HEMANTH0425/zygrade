@@ -340,10 +340,18 @@ Future<void> _startAutoRevivePingLoop(ServiceInstance service) async {
       _log(service, '[Auto-Revive] Ping failed ($_failedPingCount/3)');
       
       if (_failedPingCount >= 3) {
-        _log(service, '⚠️ Game Crash Detected. Firing Auto-Revive Intent...');
+        _log(service, '⚠️ Game Crash Detected. Firing SU Hard-Reset & Auto-Revive...');
         _failedPingCount = 0;
         
-        // Launch Pokémon GO
+        // 1. Root Hard-Kill (Phase 5.1)
+        try {
+          await Process.run('su', ['-c', 'am force-stop com.nianticlabs.pokemongo']);
+          _log(service, '  ✓ Force-stopped game via SU');
+        } catch (e) {
+          _log(service, '  ✗ SU Force-stop failed (device not rooted?): $e');
+        }
+
+        // 2. Launch Pokémon GO
         try {
           const intent = AndroidIntent(
             action: 'android.intent.action.MAIN',
@@ -353,7 +361,7 @@ Future<void> _startAutoRevivePingLoop(ServiceInstance service) async {
           );
           await intent.launch();
         } catch (e) {
-          _log(service, '✗ Auto-Revive failed: $e');
+          _log(service, '  ✗ Auto-Revive launch failed: $e');
         }
       }
     }
