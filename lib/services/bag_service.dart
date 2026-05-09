@@ -155,8 +155,10 @@ Future<void> _startStateMachine(ServiceInstance service) async {
     const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
       'sovereign_alerts',
       'Sovereign Alerts',
-      importance: Importance.max,
+      importance: Importance.high,
       priority: Priority.high,
+      enableVibration: false,
+      playSound: true,
       ticker: 'ticker',
     );
     const NotificationDetails details = NotificationDetails(android: androidDetails);
@@ -338,9 +340,9 @@ Future<void> _startAutoRevivePingLoop(ServiceInstance service) async {
       }
     } catch (_) {
       _failedPingCount++;
-      _log(service, '[Auto-Revive] Ping failed ($_failedPingCount/3)');
+      _log(service, '[Auto-Revive] Ping failed ($_failedPingCount/8)');
       
-      if (_failedPingCount >= 3) {
+      if (_failedPingCount >= 8) {
         _log(service, '⚠️ Game Crash Detected. Firing SU Hard-Reset & Auto-Revive...');
         _failedPingCount = 0;
         
