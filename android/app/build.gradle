@@ -49,12 +49,7 @@ android {
         multiDexEnabled true
     }
 
-    buildTypes {
-        release {
-            signingConfig signingConfigs.debug
-            minifyEnabled false
-        }
-    }
+
 }
 
 flutter {
