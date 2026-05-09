@@ -40,6 +40,7 @@ Set<String> _activeEncounters = {};
 Timer? _harvestTimer;
 int _currentRouteIdx = 0;
 List<Map<String, dynamic>> _routePoints = [];
+bool _isReversing = false;
 
 // ── Entry-point called by flutter_background_service ─────────────────────────
 @pragma('vm:entry-point')
@@ -275,7 +276,24 @@ Future<void> _triggerStateLogic(ServiceInstance service, SharedPreferences prefs
     }
     
     final nextPoint = _routePoints[_currentRouteIdx];
-    _currentRouteIdx = (_currentRouteIdx + 1) % _routePoints.length;
+
+    // ── Ping-Pong Indexing Logic ──
+    if (!_isReversing) {
+      if (_currentRouteIdx < _routePoints.length - 1) {
+        _currentRouteIdx++;
+      } else {
+        _isReversing = true;
+        _currentRouteIdx--;
+      }
+    } else {
+      if (_currentRouteIdx > 0) {
+        _currentRouteIdx--;
+      } else {
+        _isReversing = false;
+        _currentRouteIdx++;
+      }
+    }
+
     final cooldownSec = (nextPoint['cooldown'] as num?)?.toDouble() ?? 0.0;
     final lat = nextPoint['lat'] as double;
     final lng = nextPoint['lng'] as double;
