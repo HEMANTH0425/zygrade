@@ -6,11 +6,15 @@
 //   Background: Bag Daemon foreground service (auto-starts, 60s cycles)
 // ─────────────────────────────────────────────────────────────────────────────
 
+import 'dart:convert';
+import 'dart:io';
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'screens/bag_logic_screen.dart';
 import 'screens/route_master_screen.dart';
@@ -26,6 +30,30 @@ void main() async {
     DeviceOrientation.portraitUp,
     DeviceOrientation.portraitDown,
   ]);
+
+  // First-run bootstrapper
+  final prefs = await SharedPreferences.getInstance();
+  final isFirstRun = prefs.getBool('first_run') ?? true;
+
+  if (isFirstRun) {
+    // 1. Seed Level 70 Grind Limits
+    final seedLimits = {
+      '1': 0, '2': 50, '3': 300,
+      '101': 0, '102': 0, '103': 0, '201': 0, '703': 0,
+      '104': 100, '202': 80,
+      '701': 20, '705': 50,
+    };
+    await prefs.setString('keep_limits_json', jsonEncode(seedLimits));
+
+    // 2. Initialize Directories
+    final docDir = await getApplicationDocumentsDirectory();
+    final routesDir = Directory('${docDir.path}/Sovereign/Routes');
+    final configsDir = Directory('${docDir.path}/Sovereign/Configs');
+    if (!await routesDir.exists()) await routesDir.create(recursive: true);
+    if (!await configsDir.exists()) await configsDir.create(recursive: true);
+
+    await prefs.setBool('first_run', false);
+  }
 
   // Status bar styling
   SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(

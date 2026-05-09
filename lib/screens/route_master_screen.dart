@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:xml/xml.dart';
 import 'package:google_fonts/google_fonts.dart';
 
@@ -35,9 +36,13 @@ class _RouteMasterScreenState extends State<RouteMasterScreen> {
   }
 
   Future<void> _processGpx() async {
+    final docDir = await getApplicationDocumentsDirectory();
+    final routesDir = Directory('${docDir.path}/Sovereign/Routes');
+    
     FilePickerResult? result = await FilePicker.platform.pickFiles(
       type: FileType.custom,
       allowedExtensions: ['gpx'],
+      initialDirectory: routesDir.path,
     );
 
     if (result == null || result.files.single.path == null) return;

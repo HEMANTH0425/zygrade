@@ -20,6 +20,7 @@ import 'dart:io';
 import 'package:http/http.dart' as http;
 import 'package:android_intent_plus/android_intent.dart';
 import 'package:android_intent_plus/flag.dart';
+import 'package:flutter_background_service/flutter_background_service.dart';
 
 class _WebViewScreenState extends State<WebViewScreen>
     with AutomaticKeepAliveClientMixin {
@@ -31,10 +32,24 @@ class _WebViewScreenState extends State<WebViewScreen>
   @override
   bool get wantKeepAlive => true; // don't reload when switching tabs
 
+  String _hudState = 'Idle';
+  int _hudTargets = 0;
+  double _hudCooldown = 0.0;
+
   @override
   void initState() {
     super.initState();
     _checkServerHealth();
+    
+    FlutterBackgroundService().on('hudUpdate').listen((event) {
+      if (mounted && event != null) {
+        setState(() {
+          _hudState = event['state'] as String? ?? 'Idle';
+          _hudTargets = event['targets'] as int? ?? 0;
+          _hudCooldown = (event['cooldown'] as num?)?.toDouble() ?? 0.0;
+        });
+      }
+    });
   }
 
   Future<void> _checkServerHealth() async {
@@ -130,7 +145,49 @@ class _WebViewScreenState extends State<WebViewScreen>
         // ── Loading shimmer ──
         if (_isChecking)
           _buildLoadingOverlay(),
+
+        // ── Sovereign HUD ──
+        if (!_isOffline)
+          _buildSovereignHud(),
       ],
+    );
+  }
+
+  Widget _buildSovereignHud() {
+    return Positioned(
+      top: 80,
+      right: 16,
+      child: GlassCard(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        borderRadius: 12,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  _hudState == 'Harvesting' ? Icons.bolt_rounded :
+                  _hudState == 'Jumping' ? Icons.rocket_launch_rounded :
+                  _hudState == 'SpeedLockWait' ? Icons.hourglass_top_rounded : Icons.pause_circle_filled_rounded,
+                  color: SovereignTheme.accentViolet,
+                  size: 14,
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  _hudState.toUpperCase(),
+                  style: const TextStyle(color: SovereignTheme.accentViolet, fontWeight: FontWeight.bold, fontSize: 10, letterSpacing: 1.2),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text('🎯 Targets: $_hudTargets', style: const TextStyle(color: Colors.white, fontSize: 12)),
+            const SizedBox(height: 2),
+            Text('⏳ Cooldown: ${_hudCooldown.toStringAsFixed(1)}s', style: const TextStyle(color: SovereignTheme.textMuted, fontSize: 10)),
+          ],
+        ),
+      ),
     );
   }
 

@@ -17,6 +17,7 @@ import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_staggered_animations/flutter_staggered_animations.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../constants.dart';
 import '../theme/sovereign_theme.dart';
 
 // ── Item model ────────────────────────────────────────────────────────────────
@@ -88,43 +89,6 @@ class _BagLogicScreenState extends State<BagLogicScreen>
   String _baseUrl      = 'http://localhost:8080';
   bool _serviceRunning = false;
 
-  // ── Built-in item list (matches assets/item_names.json) ───────────────────
-  static const _kDefaultItems = [
-    {'id': 1,    'name': 'Poké Ball'},
-    {'id': 2,    'name': 'Great Ball'},
-    {'id': 3,    'name': 'Ultra Ball'},
-    {'id': 4,    'name': 'Master Ball'},
-    {'id': 101,  'name': 'Potion'},
-    {'id': 102,  'name': 'Super Potion'},
-    {'id': 103,  'name': 'Hyper Potion'},
-    {'id': 104,  'name': 'Max Potion'},
-    {'id': 201,  'name': 'Revive'},
-    {'id': 202,  'name': 'Max Revive'},
-    {'id': 301,  'name': 'Lucky Egg'},
-    {'id': 401,  'name': 'Incense'},
-    {'id': 402,  'name': 'Glacial Lure'},
-    {'id': 403,  'name': 'Mossy Lure'},
-    {'id': 404,  'name': 'Magnetic Lure'},
-    {'id': 701,  'name': 'Razz Berry'},
-    {'id': 702,  'name': 'Bluk Berry'},
-    {'id': 703,  'name': 'Nanab Berry'},
-    {'id': 704,  'name': 'Wepar Berry'},
-    {'id': 705,  'name': 'Pinap Berry'},
-    {'id': 706,  'name': 'Golden Razz Berry'},
-    {'id': 707,  'name': 'Silver Pinap Berry'},
-    {'id': 708,  'name': 'Silver Razz Berry'},
-    {'id': 901,  'name': 'Star Piece'},
-    {'id': 902,  'name': 'Sun Stone'},
-    {'id': 903,  'name': "King's Rock"},
-    {'id': 904,  'name': 'Metal Coat'},
-    {'id': 905,  'name': 'Dragon Scale'},
-    {'id': 906,  'name': "Up-Grade"},
-    {'id': 1101, 'name': 'Fast TM'},
-    {'id': 1201, 'name': 'Charged TM'},
-    {'id': 1301, 'name': 'Elite Fast TM'},
-    {'id': 1401, 'name': 'Elite Charged TM'},
-  ];
-
   // ── Lifecycle ──────────────────────────────────────────────────────────────
   @override
   void initState() {
@@ -142,12 +106,13 @@ class _BagLogicScreenState extends State<BagLogicScreen>
   }
 
   void _buildEntries() {
-    _entries = _kDefaultItems.map((m) {
-      final id = m['id'] as int;
+    _entries = masterItemDict.entries.map((entry) {
+      final id = entry.key;
+      final name = entry.value;
       return _ItemEntry(
         id   : id,
-        name : m['name'] as String,
-        emoji: _emojiFor(id, m['name'] as String),
+        name : name,
+        emoji: _emojiFor(id, name),
       );
     }).toList();
   }
