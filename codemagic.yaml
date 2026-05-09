@@ -1,0 +1,21 @@
+workflows:
+  android-release:
+    name: Sovereign Mobile – Android APK
+    max_build_duration: 30
+    environment:
+      flutter: 3.29.3
+      java: 17
+    scripts:
+      - name: Get dependencies
+        script: flutter pub get
+      - name: Build debug APK
+        script: flutter build apk --debug --no-tree-shake-icons
+    artifacts:
+      - build/app/outputs/flutter-apk/app-debug.apk
+    publishing:
+      email:
+        recipients:
+          - you@example.com   # ← change to your email
+        notify:
+          success: true
+          failure: true
