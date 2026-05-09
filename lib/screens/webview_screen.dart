@@ -33,6 +33,7 @@ class _WebViewScreenState extends State<WebViewScreen>
   bool get wantKeepAlive => true; // don't reload when switching tabs
 
   String _hudState = 'Idle';
+  String _hudUsername = 'Unknown';
   int _hudTargets = 0;
   double _hudCooldown = 0.0;
 
@@ -45,6 +46,7 @@ class _WebViewScreenState extends State<WebViewScreen>
       if (mounted && event != null) {
         setState(() {
           _hudState = event['state'] as String? ?? 'Idle';
+          _hudUsername = event['username'] as String? ?? 'Unknown';
           _hudTargets = event['targets'] as int? ?? 0;
           _hudCooldown = (event['cooldown'] as num?)?.toDouble() ?? 0.0;
         });
@@ -170,18 +172,26 @@ class _WebViewScreenState extends State<WebViewScreen>
                 Icon(
                   _hudState == 'Harvesting' ? Icons.bolt_rounded :
                   _hudState == 'Jumping' ? Icons.rocket_launch_rounded :
-                  _hudState == 'SpeedLockWait' ? Icons.hourglass_top_rounded : Icons.pause_circle_filled_rounded,
-                  color: SovereignTheme.accentViolet,
+                  _hudState == 'SpeedLockWait' ? Icons.hourglass_top_rounded :
+                  _hudState == 'MaxLimitReached' ? Icons.block_flipped : Icons.pause_circle_filled_rounded,
+                  color: _hudState == 'MaxLimitReached' ? SovereignTheme.danger : SovereignTheme.accentViolet,
                   size: 14,
                 ),
                 const SizedBox(width: 6),
                 Text(
                   _hudState.toUpperCase(),
-                  style: const TextStyle(color: SovereignTheme.accentViolet, fontWeight: FontWeight.bold, fontSize: 10, letterSpacing: 1.2),
+                  style: TextStyle(
+                    color: _hudState == 'MaxLimitReached' ? SovereignTheme.danger : SovereignTheme.accentViolet, 
+                    fontWeight: FontWeight.bold, 
+                    fontSize: 10, 
+                    letterSpacing: 1.2
+                  ),
                 ),
               ],
             ),
-            const SizedBox(height: 6),
+            const SizedBox(height: 8),
+            Text('👤 User: $_hudUsername', style: const TextStyle(color: SovereignTheme.textMuted, fontSize: 10)),
+            const SizedBox(height: 4),
             Text('🎯 Targets: $_hudTargets', style: const TextStyle(color: Colors.white, fontSize: 12)),
             const SizedBox(height: 2),
             Text('⏳ Cooldown: ${_hudCooldown.toStringAsFixed(1)}s', style: const TextStyle(color: SovereignTheme.textMuted, fontSize: 10)),

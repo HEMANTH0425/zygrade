@@ -1,6 +1,6 @@
 // lib/services/bag_service.dart
 // ─────────────────────────────────────────────────────────────────────────────
-// Sovereign Mobile – Sentinel Daemon & Reactive State Machine
+// Sovereign Mobile – Sentinel Daemon & Reactive State Machine (The Warden)
 // ─────────────────────────────────────────────────────────────────────────────
 
 import 'dart:async';
@@ -11,6 +11,9 @@ import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
+import 'package:android_intent_plus/android_intent.dart';
+import 'package:android_intent_plus/flag.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 import '../database/route_database.dart';
 
@@ -22,11 +25,23 @@ const int    _kCycleSeconds    = 60;
 const String _kLogKey          = 'service_log';
 const int    _kMaxLogLines     = 50;
 
-enum EngineState { Idle, Jumping, SpeedLockWait, Harvesting }
+enum EngineState { Idle, Jumping, SpeedLockWait, Harvesting, MaxLimitReached }
+
+// ── Globals ──────────────────────────────────────────────────────────────────
+String _activeUsername = 'Unknown';
+int _failedPingCount = 0;
+final FlutterLocalNotificationsPlugin _notifications = FlutterLocalNotificationsPlugin();
 
 // ── Entry-point called by flutter_background_service ─────────────────────────
 @pragma('vm:entry-point')
 void onServiceStart(ServiceInstance service) async {
+  // Initialize notifications
+  const AndroidInitializationSettings initializationSettingsAndroid =
+      AndroidInitializationSettings('@mipmap/ic_launcher');
+  const InitializationSettings initializationSettings =
+      InitializationSettings(android: initializationSettingsAndroid);
+  await _notifications.initialize(initializationSettings);
+
   if (service is AndroidServiceInstance) {
     service.on('setAsForeground').listen((_) {
       service.setAsForegroundService();
@@ -36,7 +51,7 @@ void onServiceStart(ServiceInstance service) async {
     });
     service.setForegroundNotificationInfo(
       title: 'Sovereign Sentinel',
-      content: 'Initializing State Machine...',
+      content: 'The Warden is Active...',
     );
   }
 
@@ -71,11 +86,17 @@ Future<void> _startStateMachine(ServiceInstance service) async {
   final prefs   = await SharedPreferences.getInstance();
   final baseUrl = prefs.getString(_kBaseUrlKey) ?? _kDefaultBase;
 
-  // 1. Initial health check
+  // 1. Initial health check & Identity Hook
   try {
-    await http
+    final response = await http
         .get(Uri.parse('$baseUrl/api/player'))
         .timeout(const Duration(seconds: 2));
+    
+    if (response.statusCode == 200) {
+      final data = jsonDecode(response.body);
+      _activeUsername = data['username'] ?? 'Unknown';
+      _log(service, '[Identity] Bound to user: $_activeUsername');
+    }
   } catch (e) {
     _log(service, '[Sentinel] Zygarde Offline. Retrying in 10s...');
     await Future.delayed(const Duration(seconds: 10));
@@ -100,6 +121,7 @@ Future<void> _startStateMachine(ServiceInstance service) async {
   WebSocketChannel? channel;
   try {
     channel = WebSocketChannel.connect(Uri.parse(wsUrl));
+    _failedPingCount = 0; // Reset on successful connect
   } catch (e) {
     _log(service, '[Sentinel] WS Connect failed. Retrying in 10s...');
     await Future.delayed(const Duration(seconds: 10));
@@ -117,6 +139,7 @@ Future<void> _startStateMachine(ServiceInstance service) async {
       'state': currentState.name,
       'targets': activeEncounters.length,
       'cooldown': cooldownRemaining,
+      'username': _activeUsername,
     });
   }
 
@@ -125,9 +148,44 @@ Future<void> _startStateMachine(ServiceInstance service) async {
     broadcastHud(cooldown);
   }
 
+  Future<void> _showLimitNotification() async {
+    const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
+      'sovereign_alerts',
+      'Sovereign Alerts',
+      importance: Importance.max,
+      priority: Priority.high,
+      ticker: 'ticker',
+    );
+    const NotificationDetails details = NotificationDetails(android: androidDetails);
+    await _notifications.show(
+      999,
+      '🛑 SOVEREIGN HALTED',
+      '4500 Daily Limit Reached for $_activeUsername',
+      details,
+    );
+  }
+
   // The main machine loop mechanism
   Future<void> triggerStateLogic() async {
     if (currentState == EngineState.Jumping) {
+      // 4500 Killswitch Check
+      final dailyCatches = await RouteDatabase.instance.getDailyCatches(_activeUsername);
+      if (dailyCatches >= 4500) {
+        _log(service, '🛑 LIMIT REACHED: $dailyCatches/4500 for $_activeUsername');
+        transitionTo(EngineState.MaxLimitReached);
+        await _showLimitNotification();
+        
+        // Turn Auto-catch OFF
+        try {
+          channel?.sink.add(jsonEncode({
+            "type": "action", 
+            "action": "settings.set", 
+            "payload": {"type": "bool", "category": "Map", "name": "Auto catch all", "value": false}
+          }));
+        } catch (_) {}
+        return;
+      }
+
       if (routePoints.isEmpty) {
         _log(service, 'No route loaded. Staying idle.');
         transitionTo(EngineState.Idle);
@@ -142,7 +200,6 @@ Future<void> _startStateMachine(ServiceInstance service) async {
 
       _log(service, '⚡ Jumping to $lat, $lng');
       
-      // Send location.set
       try {
         channel?.sink.add(jsonEncode({
           'type': 'action',
@@ -151,7 +208,6 @@ Future<void> _startStateMachine(ServiceInstance service) async {
           'payload': {'lat': lat, 'lng': lng}
         }));
         
-        // Send settings.set (Auto-catch false)
         channel?.sink.add(jsonEncode({
           "type": "action", 
           "action": "settings.set", 
@@ -162,24 +218,18 @@ Future<void> _startStateMachine(ServiceInstance service) async {
       }
 
       transitionTo(EngineState.SpeedLockWait, cooldownSec);
-      
-      // Wait out the cooldown
       await Future.delayed(Duration(milliseconds: (cooldownSec * 1000).toInt()));
       
-      // Send settings.set (Auto-catch true)
       try {
         channel?.sink.add(jsonEncode({
           "type": "action", 
           "action": "settings.set", 
           "payload": {"type": "bool", "category": "Map", "name": "Auto catch all", "value": true}
         }));
-      } catch (e) {
-        // ignore
-      }
+      } catch (_) {}
       
       transitionTo(EngineState.Harvesting);
       
-      // Failsafe timer for harvesting
       harvestTimer?.cancel();
       harvestTimer = Timer(const Duration(seconds: 45), () {
         if (currentState == EngineState.Harvesting) {
@@ -189,7 +239,6 @@ Future<void> _startStateMachine(ServiceInstance service) async {
         }
       });
       
-      // In case activeEncounters is ALREADY empty when we start harvesting
       if (activeEncounters.isEmpty) {
         harvestTimer?.cancel();
         transitionTo(EngineState.Jumping);
@@ -202,11 +251,22 @@ Future<void> _startStateMachine(ServiceInstance service) async {
   channel.stream.listen((message) {
     try {
       final decoded = jsonDecode(message);
+      
+      // Catch Logger (Phase 5)
+      // Detect successful catch in telemetry or state stream
+      // Typical Zygarde catch event: {type: "telemetry", payload: {type: "catch", success: true, ...}}
+      if (decoded['type'] == 'telemetry' && decoded['payload'] != null) {
+        final p = decoded['payload'];
+        if (p['type'] == 'catch' && p['success'] == true) {
+          RouteDatabase.instance.insertCatch(_activeUsername, DateTime.now().millisecondsSinceEpoch);
+          _log(service, '🎯 Catch logged for $_activeUsername');
+        }
+      }
+
       if (decoded['type'] == 'map' && decoded['payload'] != null) {
         final payload = decoded['payload'];
         bool changed = false;
         
-        // Add new encounters
         if (payload['pokemon'] != null) {
           for (var p in payload['pokemon']) {
             final id = p['encounter_id'].toString();
@@ -217,7 +277,6 @@ Future<void> _startStateMachine(ServiceInstance service) async {
           }
         }
         
-        // Remove completed encounters
         if (payload['removed_pokemon'] != null) {
           for (var p in payload['removed_pokemon']) {
             if (activeEncounters.contains(p.toString())) {
@@ -229,7 +288,6 @@ Future<void> _startStateMachine(ServiceInstance service) async {
         
         if (changed) {
           broadcastHud(0);
-          // If we are harvesting and just cleared the node
           if (currentState == EngineState.Harvesting && activeEncounters.isEmpty) {
             harvestTimer?.cancel();
             transitionTo(EngineState.Jumping);
@@ -238,23 +296,68 @@ Future<void> _startStateMachine(ServiceInstance service) async {
         }
       }
     } catch (e) {
-      // ignore parsing errors
+      // ignore
     }
   }, onDone: () {
-    _log(service, 'WebSocket closed. Restarting state machine...');
-    Future.delayed(const Duration(seconds: 5), () => _startStateMachine(service));
+    _log(service, 'WebSocket closed. Entering Auto-Revive ping loop...');
+    _startAutoRevivePingLoop(service);
   }, onError: (err) {
-    _log(service, 'WebSocket error: $err');
-    Future.delayed(const Duration(seconds: 5), () => _startStateMachine(service));
+    _log(service, 'WebSocket error: $err. Entering Auto-Revive ping loop...');
+    _startAutoRevivePingLoop(service);
   });
 
-  // Kickstart the machine
   if (routePoints.isNotEmpty) {
     transitionTo(EngineState.Jumping);
     triggerStateLogic();
   } else {
     transitionTo(EngineState.Idle);
   }
+}
+
+// ── Auto-Revive Logic (Phase 5) ───────────────────────────────────────────────
+Future<void> _startAutoRevivePingLoop(ServiceInstance service) async {
+  final prefs   = await SharedPreferences.getInstance();
+  final baseUrl = prefs.getString(_kBaseUrlKey) ?? _kDefaultBase;
+  
+  _failedPingCount = 0;
+  
+  Timer.periodic(const Duration(seconds: 5), (timer) async {
+    try {
+      final response = await http
+          .get(Uri.parse(baseUrl))
+          .timeout(const Duration(seconds: 2));
+      
+      if (response.statusCode == 200) {
+        // Server is back!
+        timer.cancel();
+        _log(service, '[Auto-Revive] Server detected. Reconnecting...');
+        _startStateMachine(service);
+      } else {
+        throw Exception();
+      }
+    } catch (_) {
+      _failedPingCount++;
+      _log(service, '[Auto-Revive] Ping failed ($_failedPingCount/3)');
+      
+      if (_failedPingCount >= 3) {
+        _log(service, '⚠️ Game Crash Detected. Firing Auto-Revive Intent...');
+        _failedPingCount = 0;
+        
+        // Launch Pokémon GO
+        try {
+          const intent = AndroidIntent(
+            action: 'android.intent.action.MAIN',
+            package: 'com.nianticlabs.pokemongo',
+            componentName: 'com.nianticlabs.pokemongo.UnityMainActivity',
+            flags: <int>[Flag.FLAG_ACTIVITY_NEW_TASK],
+          );
+          await intent.launch();
+        } catch (e) {
+          _log(service, '✗ Auto-Revive failed: $e');
+        }
+      }
+    }
+  });
 }
 
 // ── Independent Bag Cleanup Cycle ─────────────────────────────────────────────
@@ -276,7 +379,7 @@ Future<void> _runBagCleanup(ServiceInstance service) async {
         .get(Uri.parse('$baseUrl/api/player'))
         .timeout(const Duration(seconds: 2));
   } catch (_) {
-    return; // Zygarde Offline
+    return;
   }
 
   try {
@@ -378,7 +481,7 @@ Future<void> initBagService() async {
       isForegroundMode : true,
       notificationChannelId: 'sovereign_bag_channel',
       initialNotificationTitle: 'Sovereign Sentinel',
-      initialNotificationContent: 'Monitoring state...',
+      initialNotificationContent: 'The Warden is active...',
       foregroundServiceNotificationId: 888,
       foregroundServiceTypes: [AndroidForegroundType.dataSync],
     ),

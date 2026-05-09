@@ -41,6 +41,10 @@ dependencies:
   # System Intents
   android_intent_plus: ^5.0.2
 
+  # Permissions & Notifications
+  permission_handler: ^11.3.1
+  flutter_local_notifications: ^17.2.2
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

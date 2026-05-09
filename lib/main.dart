@@ -16,6 +16,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:permission_handler/permission_handler.dart';
 import 'screens/bag_logic_screen.dart';
 import 'screens/route_master_screen.dart';
 import 'screens/webview_screen.dart';
@@ -51,6 +52,13 @@ void main() async {
     final configsDir = Directory('${docDir.path}/Sovereign/Configs');
     if (!await routesDir.exists()) await routesDir.create(recursive: true);
     if (!await configsDir.exists()) await configsDir.create(recursive: true);
+
+    // 3. Request Overlay Permission (The Warden Failsafe)
+    if (Platform.isAndroid) {
+      if (!await Permission.systemAlertWindow.isGranted) {
+        await Permission.systemAlertWindow.request();
+      }
+    }
 
     await prefs.setBool('first_run', false);
   }

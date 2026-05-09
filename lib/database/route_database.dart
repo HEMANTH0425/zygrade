@@ -31,6 +31,13 @@ CREATE TABLE hex_routes (
   createdAt TEXT NOT NULL
 )
 ''');
+    await db.execute('''
+CREATE TABLE catch_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  username TEXT NOT NULL,
+  timestamp INTEGER NOT NULL
+)
+''');
   }
 
   Future<int> insertRoute(String name, int pointCount, List<Map<String, dynamic>> points) async {
@@ -52,5 +59,26 @@ CREATE TABLE hex_routes (
   Future<int> deleteRoute(int id) async {
     final db = await instance.database;
     return await db.delete('hex_routes', where: 'id = ?', whereArgs: [id]);
+  }
+
+  // ── Catch Ledger (Phase 5) ──────────────────────────────────────────────────
+  Future<int> insertCatch(String username, int timestamp) async {
+    final db = await instance.database;
+    return await db.insert('catch_logs', {
+      'username': username,
+      'timestamp': timestamp,
+    });
+  }
+
+  Future<int> getDailyCatches(String username) async {
+    final db = await instance.database;
+    final oneDayAgo = DateTime.now().millisecondsSinceEpoch - 86400000;
+    
+    final result = await db.rawQuery(
+      'SELECT COUNT(*) as count FROM catch_logs WHERE username = ? AND timestamp > ?',
+      [username, oneDayAgo],
+    );
+    
+    return Sqflite.firstIntValue(result) ?? 0;
   }
 }
