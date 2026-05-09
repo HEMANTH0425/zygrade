@@ -38,6 +38,9 @@ dependencies:
   flutter_staggered_animations: ^1.1.1
   cupertino_icons: ^1.0.8
 
+  # System Intents
+  android_intent_plus: ^5.0.2
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

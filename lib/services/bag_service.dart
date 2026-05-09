@@ -86,6 +86,21 @@ Future<void> _runCycle(ServiceInstance service) async {
   }
 
   try {
+    await http
+        .get(Uri.parse('$baseUrl/api/player'))
+        .timeout(const Duration(seconds: 2));
+  } on SocketException catch (_) {
+    _log(service, '[Sentinel] Zygarde Offline. Sleeping for ${_kCycleSeconds}s...');
+    return;
+  } on TimeoutException catch (_) {
+    _log(service, '[Sentinel] Zygarde Offline. Sleeping for ${_kCycleSeconds}s...');
+    return;
+  } catch (_) {
+    _log(service, '[Sentinel] Zygarde Offline. Sleeping for ${_kCycleSeconds}s...');
+    return;
+  }
+
+  try {
     final response = await http
         .get(Uri.parse('$baseUrl/api/item/all'))
         .timeout(const Duration(seconds: 5));
@@ -147,18 +162,26 @@ Future<void> _discardViaWebSocket(
     channel = WebSocketChannel.connect(Uri.parse(wsUrl));
 
     for (final entry in trashList) {
-      final payload = jsonEncode({
-        'type'     : 'action',
-        'action'   : 'item.recycle',
-        'requestId': DateTime.now().millisecondsSinceEpoch.toString(),
-        'payload'  : {
-          'itemId': entry['id'],
-          'amount': entry['excess'],
-        }
-      });
-      channel.sink.add(payload);
-      _log(service, '  ✓ Discarded ${entry["excess"]}x ${entry["name"]}');
-      await Future.delayed(const Duration(milliseconds: 100));
+      try {
+        final payload = jsonEncode({
+          'type'     : 'action',
+          'action'   : 'item.recycle',
+          'requestId': DateTime.now().millisecondsSinceEpoch.toString(),
+          'payload'  : {
+            'itemId': entry['id'],
+            'amount': entry['excess'],
+          }
+        });
+        channel.sink.add(payload);
+        _log(service, '  ✓ Discarded ${entry["excess"]}x ${entry["name"]}');
+        await Future.delayed(const Duration(milliseconds: 100));
+      } on WebSocketChannelException catch (e) {
+        _log(service, '  ✗ Game crashed or socket dropped: $e');
+        break;
+      } catch (e) {
+        _log(service, '  ✗ Error during discard: $e');
+        break;
+      }
     }
   } catch (e) {
     _log(service, '  ✗ WebSocket error: $e');

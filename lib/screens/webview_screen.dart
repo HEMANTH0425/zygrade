@@ -16,10 +16,16 @@ class WebViewScreen extends StatefulWidget {
   State<WebViewScreen> createState() => _WebViewScreenState();
 }
 
+import 'dart:io';
+import 'package:http/http.dart' as http;
+import 'package:android_intent_plus/android_intent.dart';
+import 'package:android_intent_plus/flag.dart';
+
 class _WebViewScreenState extends State<WebViewScreen>
     with AutomaticKeepAliveClientMixin {
-  late final WebViewController _controller;
-  bool _isLoading = true;
+  WebViewController? _controller;
+  bool _isChecking = true;
+  bool _isOffline = true;
   String? _error;
 
   @override
@@ -28,18 +34,79 @@ class _WebViewScreenState extends State<WebViewScreen>
   @override
   void initState() {
     super.initState();
+    _checkServerHealth();
+  }
+
+  Future<void> _checkServerHealth() async {
+    setState(() {
+      _isChecking = true;
+      _error = null;
+    });
+
+    try {
+      final response = await http
+          .get(Uri.parse('http://localhost:8080/api/player'))
+          .timeout(const Duration(seconds: 2));
+
+      if (response.statusCode == 200 || response.statusCode == 404) {
+        // Server is reachable (even if 404, the server process is alive)
+        _initWebView();
+        if (mounted) {
+          setState(() {
+            _isOffline = false;
+            _isChecking = false;
+          });
+        }
+      } else {
+        throw Exception('Server returned ${response.statusCode}');
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _isOffline = true;
+          _isChecking = false;
+          _error = 'Zygarde server is unreachable.';
+        });
+      }
+    }
+  }
+
+  void _initWebView() {
+    if (_controller != null) return;
     _controller = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setBackgroundColor(SovereignTheme.bgDeep)
       ..setNavigationDelegate(NavigationDelegate(
-        onPageStarted: (_) => setState(() => _isLoading = true),
-        onPageFinished: (_) => setState(() => _isLoading = false),
+        onPageStarted: (_) => setState(() => _isChecking = true),
+        onPageFinished: (_) => setState(() => _isChecking = false),
         onWebResourceError: (e) => setState(() {
-          _isLoading = false;
+          _isChecking = false;
           _error = e.description;
+          _isOffline = true;
         }),
       ))
       ..loadRequest(Uri.parse(widget.url));
+  }
+
+  Future<void> _launchGame() async {
+    try {
+      const intent = AndroidIntent(
+        action: 'android.intent.action.MAIN',
+        package: 'com.nianticlabs.pokemongo',
+        componentName: 'com.nianticlabs.pokemongo.UnityMainActivity',
+        flags: <int>[Flag.FLAG_ACTIVITY_NEW_TASK],
+      );
+      await intent.launch();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            backgroundColor: SovereignTheme.danger,
+            content: const Text('Pokémon GO is not installed or could not be launched.', style: TextStyle(color: Colors.white)),
+          ),
+        );
+      }
+    }
   }
 
   @override
@@ -54,14 +121,14 @@ class _WebViewScreenState extends State<WebViewScreen>
           ),
         ),
 
-        // ── WebView ──
-        if (_error == null)
-          WebViewWidget(controller: _controller)
-        else
-          _buildErrorState(),
+        // ── Main Content ──
+        if (_isOffline)
+          _buildOfflineState()
+        else if (_controller != null)
+          WebViewWidget(controller: _controller!),
 
         // ── Loading shimmer ──
-        if (_isLoading)
+        if (_isChecking)
           _buildLoadingOverlay(),
       ],
     );
@@ -83,9 +150,9 @@ class _WebViewScreenState extends State<WebViewScreen>
               ),
             ),
             const SizedBox(height: 20),
-            GradientText(
+            const GradientText(
               'CONNECTING TO ZYGARDE',
-              style: const TextStyle(
+              style: TextStyle(
                 fontSize: 13, letterSpacing: 2, fontWeight: FontWeight.w600,
               ),
             ),
@@ -102,7 +169,7 @@ class _WebViewScreenState extends State<WebViewScreen>
     );
   }
 
-  Widget _buildErrorState() {
+  Widget _buildOfflineState() {
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(24),
@@ -124,14 +191,17 @@ class _WebViewScreenState extends State<WebViewScreen>
                 style: const TextStyle(
                     color: SovereignTheme.textMuted, fontSize: 12),
               ),
-              const SizedBox(height: 20),
+              const SizedBox(height: 32),
               _GlowButton(
-                label: 'RETRY',
-                icon: Icons.refresh_rounded,
-                onTap: () {
-                  setState(() { _error = null; _isLoading = true; });
-                  _controller.loadRequest(Uri.parse(widget.url));
-                },
+                label: 'LAUNCH POKÉMON GO',
+                icon: Icons.rocket_launch_rounded,
+                onTap: _launchGame,
+              ),
+              const SizedBox(height: 16),
+              TextButton.icon(
+                onPressed: _checkServerHealth,
+                icon: const Icon(Icons.refresh_rounded, color: SovereignTheme.textMuted, size: 16),
+                label: const Text('Retry Connection', style: TextStyle(color: SovereignTheme.textMuted)),
               ),
             ],
           ),
