@@ -15,6 +15,7 @@ import 'dart:io';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:http/http.dart' as http;
+import 'package:web_socket_channel/web_socket_channel.dart';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const String _kBaseUrlKey      = 'zygarde_base_url';
@@ -141,10 +142,9 @@ Future<void> _discardViaWebSocket(
       .replaceFirst('https://', 'wss://') +
       '/ws';
 
-  WebSocket? ws;
+  WebSocketChannel? channel;
   try {
-    ws = await WebSocket.connect(wsUrl)
-        .timeout(const Duration(seconds: 5));
+    channel = WebSocketChannel.connect(Uri.parse(wsUrl));
 
     for (final entry in trashList) {
       final payload = jsonEncode({
@@ -156,14 +156,14 @@ Future<void> _discardViaWebSocket(
           'amount': entry['excess'],
         }
       });
-      ws.add(payload);
+      channel.sink.add(payload);
       _log(service, '  ✓ Discarded ${entry["excess"]}x ${entry["name"]}');
-      await Future.delayed(const Duration(milliseconds: 150));
+      await Future.delayed(const Duration(milliseconds: 100));
     }
   } catch (e) {
     _log(service, '  ✗ WebSocket error: $e');
   } finally {
-    await ws?.close();
+    await channel?.sink.close();
   }
 }
 

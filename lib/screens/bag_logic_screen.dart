@@ -486,8 +486,8 @@ class _BagLogicScreenState extends State<BagLogicScreen>
           Expanded(
             flex: 2,
             child: _GradientButton(
-              label: _saving ? 'SAVING…' : 'SAVE & APPLY',
-              icon: _saving ? Icons.hourglass_top_rounded : Icons.save_rounded,
+              label: _saving ? 'SYNCING…' : 'SYNC & ARM',
+              icon: _saving ? Icons.hourglass_top_rounded : Icons.sync_rounded,
               onTap: _saving ? null : _saveAndApply,
             ),
           ),
@@ -578,6 +578,7 @@ class _ItemRow extends StatelessWidget {
             // ── Smart Box numeric input ──
             SizedBox(
               width: 80,
+              height: 48,
               child: TextField(
                 controller: entry.ctrl,
                 keyboardType: TextInputType.number,
@@ -596,7 +597,7 @@ class _ItemRow extends StatelessWidget {
                   hintStyle: TextStyle(color: SovereignTheme.textMuted),
                   labelText: 'Keep',
                   contentPadding:
-                      EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                      EdgeInsets.symmetric(horizontal: 8, vertical: 12),
                 ),
               ),
             ),

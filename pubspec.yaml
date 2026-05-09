@@ -24,8 +24,14 @@ dependencies:
   # Persistence
   shared_preferences: ^2.3.2
 
-  # Local file access
+  # Local file access & Storage
   path_provider: ^2.1.4
+  sqflite: ^2.3.0
+  file_picker: ^8.1.1
+
+  # GPX & Map Logic
+  xml: ^6.5.0
+  latlong2: ^0.9.1
 
   # UI
   google_fonts: ^6.2.1

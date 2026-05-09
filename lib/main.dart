@@ -13,6 +13,7 @@ import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import 'screens/bag_logic_screen.dart';
+import 'screens/route_master_screen.dart';
 import 'screens/webview_screen.dart';
 import 'services/bag_service.dart';
 import 'theme/sovereign_theme.dart';
@@ -62,25 +63,12 @@ class _MainShell extends StatefulWidget {
   State<_MainShell> createState() => _MainShellState();
 }
 
-class _MainShellState extends State<_MainShell>
-    with SingleTickerProviderStateMixin {
-  late final TabController _tabCtrl;
+class _MainShellState extends State<_MainShell> {
+  int _currentIndex = 0;
 
   static const _kZygardeUrl = 'http://localhost:8080';
   // ↑ Change to your PC's LAN IP (e.g. http://192.168.1.50:8080)
   //   if Zygarde is running on your PC rather than on-device.
-
-  @override
-  void initState() {
-    super.initState();
-    _tabCtrl = TabController(length: 2, vsync: this);
-  }
-
-  @override
-  void dispose() {
-    _tabCtrl.dispose();
-    super.dispose();
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -88,18 +76,41 @@ class _MainShellState extends State<_MainShell>
       backgroundColor: SovereignTheme.bgDeep,
       extendBodyBehindAppBar: true,
 
-      appBar: PreferredSize(
-        preferredSize: const Size.fromHeight(96),
-        child: _SovereignAppBar(tabCtrl: _tabCtrl),
+      appBar: const PreferredSize(
+        preferredSize: Size.fromHeight(60),
+        child: _SovereignAppBar(),
       ),
 
-      body: TabBarView(
-        controller: _tabCtrl,
-        physics: const NeverScrollableScrollPhysics(),
+      body: IndexedStack(
+        index: _currentIndex,
         children: const [
           WebViewScreen(url: _kZygardeUrl),
           BagLogicScreen(),
+          RouteMasterScreen(),
         ],
+      ),
+      
+      bottomNavigationBar: Container(
+        decoration: BoxDecoration(
+          color: SovereignTheme.bgDeep,
+          border: const Border(top: BorderSide(color: SovereignTheme.glassBorder)),
+        ),
+        child: BottomNavigationBar(
+          backgroundColor: SovereignTheme.bgDeep,
+          selectedItemColor: SovereignTheme.accentViolet,
+          unselectedItemColor: Colors.white54,
+          currentIndex: _currentIndex,
+          onTap: (index) {
+            setState(() {
+              _currentIndex = index;
+            });
+          },
+          items: const [
+            BottomNavigationBarItem(icon: Icon(Icons.map_rounded), label: 'Dashboard'),
+            BottomNavigationBarItem(icon: Icon(Icons.inventory_2_rounded), label: 'Bag Manager'),
+            BottomNavigationBarItem(icon: Icon(Icons.route_rounded), label: 'Route Master'),
+          ],
+        ),
       ),
     );
   }
@@ -109,8 +120,7 @@ class _MainShellState extends State<_MainShell>
 // Custom AppBar with glassmorphic blur backdrop
 // ─────────────────────────────────────────────────────────────────────────────
 class _SovereignAppBar extends StatelessWidget {
-  const _SovereignAppBar({required this.tabCtrl});
-  final TabController tabCtrl;
+  const _SovereignAppBar();
 
   @override
   Widget build(BuildContext context) {
@@ -130,7 +140,7 @@ class _SovereignAppBar extends StatelessWidget {
               children: [
                 // ── Title row ──
                 Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 10, 20, 6),
+                  padding: const EdgeInsets.fromLTRB(20, 10, 20, 10),
                   child: Row(
                     children: [
                       // Animated violet dot
@@ -154,21 +164,6 @@ class _SovereignAppBar extends StatelessWidget {
                       _StatusChip(),
                     ],
                   ),
-                ),
-
-                // ── Tab bar ──
-                TabBar(
-                  controller: tabCtrl,
-                  tabs: const [
-                    Tab(
-                      icon: Icon(Icons.map_rounded, size: 18),
-                      text: 'Zygarde Map',
-                    ),
-                    Tab(
-                      icon: Icon(Icons.inventory_2_rounded, size: 18),
-                      text: 'Bag Logic',
-                    ),
-                  ],
                 ),
               ],
             ),
