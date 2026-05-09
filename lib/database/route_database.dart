@@ -62,12 +62,15 @@ CREATE TABLE catch_logs (
   }
 
   // ── Catch Ledger (Phase 5) ──────────────────────────────────────────────────
-  Future<int> insertCatch(String username, int timestamp) async {
+  Future<void> insertCatch(String username, int timestamp) async {
     final db = await instance.database;
-    return await db.insert('catch_logs', {
+    await db.insert('catch_logs', {
       'username': username,
       'timestamp': timestamp,
     });
+    // Auto-cleanup logs older than 7 days
+    final sevenDaysAgo = DateTime.now().subtract(const Duration(days: 7)).millisecondsSinceEpoch;
+    await db.delete('catch_logs', where: 'timestamp < ?', whereArgs: [sevenDaysAgo]);
   }
 
   Future<int> getDailyCatches(String username) async {
