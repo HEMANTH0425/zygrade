@@ -43,8 +43,10 @@ void main() async {
       '101': 0, '102': 0, '103': 0, '201': 0, '703': 0,
       '104': 100, '202': 80,
       '701': 20, '705': 50,
+      '704': 999, '706': 999, '1201': 999, '1202': 999, '1101': 999, '1401': 999,
     };
     await prefs.setString('keep_limits_json', jsonEncode(seedLimits));
+    await prefs.setInt('daily_catch_limit', 4500);
 
     // 2. Initialize Directories
     final docDir = await getApplicationDocumentsDirectory();

@@ -20,6 +20,7 @@ import '../database/route_database.dart';
 // ── Constants ─────────────────────────────────────────────────────────────────
 const String _kBaseUrlKey      = 'zygarde_base_url';
 const String _kLimitsKey       = 'keep_limits_json';
+const String _kCatchLimitKey   = 'daily_catch_limit';
 const String _kDefaultBase     = 'http://localhost:8080';
 const int    _kCycleSeconds    = 60;
 const String _kLogKey          = 'service_log';
@@ -68,6 +69,9 @@ void onServiceStart(ServiceInstance service) async {
     if (data['baseUrl'] != null) {
       await prefs.setString(_kBaseUrlKey, data['baseUrl'] as String);
     }
+    if (data['catchLimit'] != null) {
+      await prefs.setInt(_kCatchLimitKey, data['catchLimit'] as int);
+    }
     _log(service, 'Config updated via UI.');
   });
 
@@ -98,9 +102,8 @@ Future<void> _startStateMachine(ServiceInstance service) async {
       _log(service, '[Identity] Bound to user: $_activeUsername');
     }
   } catch (e) {
-    _log(service, '[Sentinel] Zygarde Offline. Retrying in 10s...');
-    await Future.delayed(const Duration(seconds: 10));
-    _startStateMachine(service);
+    _log(service, '[Sentinel] Zygarde Offline. Entering Auto-Revive loop...');
+    _startAutoRevivePingLoop(service);
     return;
   }
 
@@ -148,7 +151,7 @@ Future<void> _startStateMachine(ServiceInstance service) async {
     broadcastHud(cooldown);
   }
 
-  Future<void> _showLimitNotification() async {
+  Future<void> _showLimitNotification(int limit) async {
     const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
       'sovereign_alerts',
       'Sovereign Alerts',
@@ -160,7 +163,7 @@ Future<void> _startStateMachine(ServiceInstance service) async {
     await _notifications.show(
       999,
       '🛑 SOVEREIGN HALTED',
-      '4500 Daily Limit Reached for $_activeUsername',
+      'Daily Limit ($limit) Reached for $_activeUsername',
       details,
     );
   }
@@ -168,12 +171,13 @@ Future<void> _startStateMachine(ServiceInstance service) async {
   // The main machine loop mechanism
   Future<void> triggerStateLogic() async {
     if (currentState == EngineState.Jumping) {
-      // 4500 Killswitch Check
+      // Dynamic Killswitch Check
+      final dailyLimit = prefs.getInt(_kCatchLimitKey) ?? 4500;
       final dailyCatches = await RouteDatabase.instance.getDailyCatches(_activeUsername);
-      if (dailyCatches >= 4500) {
-        _log(service, '🛑 LIMIT REACHED: $dailyCatches/4500 for $_activeUsername');
+      if (dailyCatches >= dailyLimit) {
+        _log(service, '🛑 LIMIT REACHED: $dailyCatches/$dailyLimit for $_activeUsername');
         transitionTo(EngineState.MaxLimitReached);
-        await _showLimitNotification();
+        await _showLimitNotification(dailyLimit);
         
         // Turn Auto-catch OFF
         try {
@@ -194,7 +198,7 @@ Future<void> _startStateMachine(ServiceInstance service) async {
       
       final nextPoint = routePoints[currentRouteIdx];
       currentRouteIdx = (currentRouteIdx + 1) % routePoints.length;
-      final cooldownSec = nextPoint['cooldown'] as double;
+      final cooldownSec = (nextPoint['cooldown'] as num?)?.toDouble() ?? 0.0;
       final lat = nextPoint['lat'] as double;
       final lng = nextPoint['lng'] as double;
 
@@ -252,17 +256,6 @@ Future<void> _startStateMachine(ServiceInstance service) async {
     try {
       final decoded = jsonDecode(message);
       
-      // Catch Logger (Phase 5)
-      // Detect successful catch in telemetry or state stream
-      // Typical Zygarde catch event: {type: "telemetry", payload: {type: "catch", success: true, ...}}
-      if (decoded['type'] == 'telemetry' && decoded['payload'] != null) {
-        final p = decoded['payload'];
-        if (p['type'] == 'catch' && p['success'] == true) {
-          RouteDatabase.instance.insertCatch(_activeUsername, DateTime.now().millisecondsSinceEpoch);
-          _log(service, '🎯 Catch logged for $_activeUsername');
-        }
-      }
-
       if (decoded['type'] == 'map' && decoded['payload'] != null) {
         final payload = decoded['payload'];
         bool changed = false;
@@ -279,9 +272,17 @@ Future<void> _startStateMachine(ServiceInstance service) async {
         
         if (payload['removed_pokemon'] != null) {
           for (var p in payload['removed_pokemon']) {
-            if (activeEncounters.contains(p.toString())) {
-              activeEncounters.remove(p.toString());
+            final id = p.toString();
+            if (activeEncounters.contains(id)) {
+              activeEncounters.remove(id);
               changed = true;
+              
+              // ── Phase 5.1 Catch Counting Logic ──
+              // If removed while harvesting, it's a catch attempt (success assumed by removal)
+              if (currentState == EngineState.Harvesting) {
+                RouteDatabase.instance.insertCatch(_activeUsername, DateTime.now().millisecondsSinceEpoch);
+                // _log(service, '🎯 Catch logged for $_activeUsername');
+              }
             }
           }
         }
@@ -343,7 +344,7 @@ Future<void> _startAutoRevivePingLoop(ServiceInstance service) async {
         _log(service, '⚠️ Game Crash Detected. Firing SU Hard-Reset & Auto-Revive...');
         _failedPingCount = 0;
         
-        // 1. Root Hard-Kill (Phase 5.1)
+        // 1. Root Hard-Kill
         try {
           await Process.run('su', ['-c', 'am force-stop com.nianticlabs.pokemongo']);
           _log(service, '  ✓ Force-stopped game via SU');

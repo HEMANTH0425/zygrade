@@ -49,7 +49,8 @@ String _emojiFor(int id, String name) {
   if (id >= 401 && id <= 404) return '🕯️'; // lures / incense
   if (id >= 701 && id <= 708) return '🍒'; // berries
   if (id >= 901 && id <= 906) return '🌟'; // evolution items
-  if (id >= 1101 && id <= 1401) return '📀'; // TMs
+  if (id >= 1101 && id <= 1202) return '📀'; // TMs / Rare Candies
+  if (id >= 1401) return '🎒'; // incubators
   return '📦';
 }
 
@@ -59,10 +60,12 @@ String _categoryFor(int id) {
   if (id >= 101 && id <= 104)   return 'Potions';
   if (id >= 201 && id <= 202)   return 'Revives';
   if (id == 301)                return 'Special';
-  if (id >= 401 && id <= 404)   return 'Lures & Incense';
+  if (id >= 401 && id <= 404)   // Lures & Incense
+                                return 'Lures & Incense';
   if (id >= 701 && id <= 708)   return 'Berries';
   if (id >= 901 && id <= 906)   return 'Evolution Items';
-  if (id >= 1101 && id <= 1401) return 'TMs';
+  if (id >= 1101 && id <= 1202) return 'Treasures';
+  if (id >= 1401) return 'Utility';
   return 'Other';
 }
 
@@ -87,7 +90,7 @@ class _BagLogicScreenState extends State<BagLogicScreen>
   final List<String> _logs = [];
   final ScrollController _logScroll = ScrollController();
   String _baseUrl      = 'http://localhost:8080';
-  bool _serviceRunning = false;
+  final TextEditingController _catchLimitCtrl = TextEditingController(text: '4500');
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
   @override
@@ -101,6 +104,7 @@ class _BagLogicScreenState extends State<BagLogicScreen>
   @override
   void dispose() {
     for (final e in _entries) e.dispose();
+    _catchLimitCtrl.dispose();
     _logScroll.dispose();
     super.dispose();
   }
@@ -121,12 +125,15 @@ class _BagLogicScreenState extends State<BagLogicScreen>
     final prefs   = await SharedPreferences.getInstance();
     final raw     = prefs.getString('keep_limits_json') ?? '{}';
     final baseUrl = prefs.getString('zygarde_base_url');
+    final catchLimit = prefs.getInt('daily_catch_limit') ?? 4500;
+    
     if (baseUrl != null) _baseUrl = baseUrl;
 
     Map<String, dynamic> saved = {};
     try { saved = jsonDecode(raw) as Map<String, dynamic>; } catch (_) {}
 
     setState(() {
+      _catchLimitCtrl.text = '$catchLimit';
       for (final e in _entries) {
         final v = saved[e.id.toString()];
         if (v != null) {
@@ -180,14 +187,18 @@ class _BagLogicScreenState extends State<BagLogicScreen>
       if (v != null && v >= 0) limits[e.id.toString()] = v;
     }
 
+    final catchLimit = int.tryParse(_catchLimitCtrl.text.trim()) ?? 4500;
+
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('keep_limits_json', jsonEncode(limits));
     await prefs.setString('zygarde_base_url', _baseUrl);
+    await prefs.setInt('daily_catch_limit', catchLimit);
 
     // Push to background service
     FlutterBackgroundService().invoke('updateConfig', {
       'limits' : limits,
       'baseUrl': _baseUrl,
+      'catchLimit': catchLimit,
     });
 
     setState(() {
@@ -288,8 +299,13 @@ class _BagLogicScreenState extends State<BagLogicScreen>
             child: AnimationLimiter(
               child: ListView.builder(
                 padding: const EdgeInsets.fromLTRB(16, 8, 16, 100),
-                itemCount: categories.length,
-                itemBuilder: (ctx, catIdx) {
+                itemCount: categories.length + 1, // +1 for the Catch Limit card
+                itemBuilder: (ctx, idx) {
+                  if (idx == 0) {
+                    return _buildWardenSettings();
+                  }
+                  
+                  final catIdx = idx - 1;
                   final cat   = categories[catIdx];
                   final items = grouped[cat]!;
                   return AnimationConfiguration.staggeredList(
@@ -351,15 +367,61 @@ class _BagLogicScreenState extends State<BagLogicScreen>
                 ],
               ),
             ),
-            _serviceRunning
-                ? const _PulseDot(color: SovereignTheme.success)
-                : const _PulseDot(color: SovereignTheme.danger),
             const SizedBox(width: 8),
             IconButton(
               onPressed: _showUrlDialog,
               icon: const Icon(Icons.edit_rounded,
                   color: SovereignTheme.accentCyan, size: 18),
               tooltip: 'Edit server URL',
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildWardenSettings() {
+    return Padding(
+      padding: const EdgeInsets.only(top: 12, bottom: 8),
+      child: GlassCard(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        borderRadius: 12,
+        child: Row(
+          children: [
+            const Icon(Icons.shield_rounded, color: SovereignTheme.accentCyan, size: 24),
+            const SizedBox(width: 16),
+            const Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('DAILY CATCH LIMIT',
+                      style: TextStyle(
+                          color: SovereignTheme.textPrimary,
+                          fontWeight: FontWeight.w700,
+                          fontSize: 12)),
+                  Text('Warden Killswitch Trigger',
+                      style: TextStyle(color: SovereignTheme.textMuted, fontSize: 10)),
+                ],
+              ),
+            ),
+            SizedBox(
+              width: 90,
+              height: 48,
+              child: TextField(
+                controller: _catchLimitCtrl,
+                keyboardType: TextInputType.number,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  color: SovereignTheme.accentCyan,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 18,
+                ),
+                decoration: const InputDecoration(
+                  contentPadding: EdgeInsets.symmetric(vertical: 12),
+                  hintText: '4500',
+                  hintStyle: TextStyle(color: SovereignTheme.textMuted),
+                ),
+              ),
             ),
           ],
         ),
@@ -462,9 +524,7 @@ class _BagLogicScreenState extends State<BagLogicScreen>
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Sub-widgets
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Sub-widgets ─────────────────────────────────────────────────────────────
 
 class _CategoryHeader extends StatelessWidget {
   const _CategoryHeader({required this.label});
@@ -567,53 +627,6 @@ class _ItemRow extends StatelessWidget {
               ),
             ),
           ],
-        ),
-      ),
-    );
-  }
-}
-
-class _PulseDot extends StatefulWidget {
-  const _PulseDot({required this.color});
-  final Color color;
-
-  @override
-  State<_PulseDot> createState() => _PulseDotState();
-}
-
-class _PulseDotState extends State<_PulseDot>
-    with SingleTickerProviderStateMixin {
-  late AnimationController _anim;
-  late Animation<double> _scale;
-
-  @override
-  void initState() {
-    super.initState();
-    _anim = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 900),
-    )..repeat(reverse: true);
-    _scale = Tween(begin: 0.6, end: 1.0).animate(
-      CurvedAnimation(parent: _anim, curve: Curves.easeInOut),
-    );
-  }
-
-  @override
-  void dispose() {
-    _anim.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return ScaleTransition(
-      scale: _scale,
-      child: Container(
-        width: 8, height: 8,
-        decoration: BoxDecoration(
-          color: widget.color,
-          shape: BoxShape.circle,
-          boxShadow: [BoxShadow(color: widget.color, blurRadius: 6)],
         ),
       ),
     );
