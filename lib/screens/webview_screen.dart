@@ -1,320 +1,323 @@
 // lib/screens/webview_screen.dart
 // ─────────────────────────────────────────────────────────────────────────────
-// Tab 1 – Zygarde WebUI embedded in a full-screen WebView.
+// Tab 1 – Master Command Center (WebView HUD)
+//
+// Features a PGTools-style stateful button that:
+// 1. Synchronously launches the game and the Sovereign background bot.
+// 2. Kills the engine and resets auto-catch when stopped.
+// 3. Syncs with the background service to reflect the current Warden state.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter_background_service/flutter_background_service.dart';
+import 'package:android_intent_plus/android_intent.dart';
+import 'package:android_intent_plus/flag.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
 import '../theme/sovereign_theme.dart';
 
 class WebViewScreen extends StatefulWidget {
-  const WebViewScreen({super.key, required this.url});
-  final String url;
+  const WebViewScreen({super.key});
 
   @override
   State<WebViewScreen> createState() => _WebViewScreenState();
 }
 
-import 'dart:io';
-import 'package:http/http.dart' as http;
-import 'package:android_intent_plus/android_intent.dart';
-import 'package:android_intent_plus/flag.dart';
-import 'package:flutter_background_service/flutter_background_service.dart';
-
-class _WebViewScreenState extends State<WebViewScreen>
-    with AutomaticKeepAliveClientMixin {
+class _WebViewScreenState extends State<WebViewScreen> {
+  // ── State ──────────────────────────────────────────────────────────────────
   WebViewController? _controller;
-  bool _isChecking = true;
-  bool _isOffline = true;
-  String? _error;
-
-  @override
-  bool get wantKeepAlive => true; // don't reload when switching tabs
-
-  String _hudState = 'Idle';
-  String _hudUsername = 'Unknown';
-  int _hudTargets = 0;
-  double _hudCooldown = 0.0;
-
+  bool _isZygardeUp     = false;
+  bool _isBotRunning    = false;
+  String _activeState   = 'Idle';
+  String _username      = 'Unknown';
+  int _targetCount      = 0;
+  
+  // ── HUD Sync ───────────────────────────────────────────────────────────────
   @override
   void initState() {
     super.initState();
-    _checkServerHealth();
-    
-    FlutterBackgroundService().on('hudUpdate').listen((event) {
-      if (mounted && event != null) {
+    _listenToHudUpdates();
+    _checkServerStatus();
+  }
+
+  void _listenToHudUpdates() {
+    FlutterBackgroundService().on('hudUpdate').listen((data) {
+      if (data != null && mounted) {
         setState(() {
-          _hudState = event['state'] as String? ?? 'Idle';
-          _hudUsername = event['username'] as String? ?? 'Unknown';
-          _hudTargets = event['targets'] as int? ?? 0;
-          _hudCooldown = (event['cooldown'] as num?)?.toDouble() ?? 0.0;
+          _activeState = data['state'] ?? 'Idle';
+          _username    = data['username'] ?? 'Unknown';
+          _targetCount = data['targets'] ?? 0;
+          
+          // Sync bot running state based on background state machine
+          if (_activeState == 'Idle' || _activeState == 'MaxLimitReached') {
+            _isBotRunning = false;
+          } else {
+            _isBotRunning = true;
+          }
         });
       }
     });
   }
 
-  Future<void> _checkServerHealth() async {
-    setState(() {
-      _isChecking = true;
-      _error = null;
+  Future<void> _checkServerStatus() async {
+    // Simple polling for the local 8080 server
+    Timer.periodic(const Duration(seconds: 3), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      // Note: In a real app, use a proper health-check. 
+      // For this UI, the background service already does this.
     });
+  }
 
-    try {
-      final response = await http
-          .get(Uri.parse('http://localhost:8080/api/player'))
-          .timeout(const Duration(seconds: 2));
-
-      if (response.statusCode == 200 || response.statusCode == 404) {
-        // Server is reachable (even if 404, the server process is alive)
-        _initWebView();
-        if (mounted) {
-          setState(() {
-            _isOffline = false;
-            _isChecking = false;
-          });
-        }
-      } else {
-        throw Exception('Server returned ${response.statusCode}');
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _isOffline = true;
-          _isChecking = false;
-          _error = 'Zygarde server is unreachable.';
-        });
-      }
+  // ── Master Control Actions ─────────────────────────────────────────────────
+  void _toggleMasterEngine() {
+    if (_isBotRunning) {
+      _stopEngine();
+    } else {
+      _startEngine();
     }
   }
 
-  void _initWebView() {
-    if (_controller != null) return;
-    _controller = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setBackgroundColor(SovereignTheme.bgDeep)
-      ..setNavigationDelegate(NavigationDelegate(
-        onPageStarted: (_) => setState(() => _isChecking = true),
-        onPageFinished: (_) => setState(() => _isChecking = false),
-        onWebResourceError: (e) => setState(() {
-          _isChecking = false;
-          _error = e.description;
-          _isOffline = true;
-        }),
-      ))
-      ..loadRequest(Uri.parse(widget.url));
-  }
+  Future<void> _startEngine() async {
+    setState(() => _isBotRunning = true);
 
-  Future<void> _launchGame() async {
+    // 1. Launch Pokémon GO
     try {
       const intent = AndroidIntent(
         action: 'android.intent.action.MAIN',
         package: 'com.nianticlabs.pokemongo',
-        componentName: 'com.nianticlabs.pokemongo.UnityMainActivity',
         flags: <int>[Flag.FLAG_ACTIVITY_NEW_TASK],
       );
       await intent.launch();
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            backgroundColor: SovereignTheme.danger,
-            content: const Text('Pokémon GO is not installed or could not be launched.', style: TextStyle(color: Colors.white)),
-          ),
+          const SnackBar(content: Text('Could not launch Pokémon GO. Is it installed?')),
         );
       }
     }
+
+    // 2. Fire IPC to Start Bot
+    FlutterBackgroundService().invoke('controlBot', {'command': 'start'});
   }
+
+  void _stopEngine() {
+    setState(() => _isBotRunning = false);
+
+    // Fire IPC to Stop Bot
+    FlutterBackgroundService().invoke('controlBot', {'command': 'stop'});
+  }
+
+  // ── Build ──────────────────────────────────────────────────────────────────
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: SovereignTheme.bgDeep,
+      body: Stack(
+        children: [
+          // ── The WebView Layer ──
+          _buildWebViewLayer(),
+
+          // ── Bottom Master Controller (PGTools Style) ──
+          _buildMasterOverlay(),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildWebViewLayer() {
+    // If bot isn't running, show the offline state
+    if (!_isBotRunning && _activeState != 'Harvesting') {
+      return _buildOfflinePlaceholder();
+    }
+
+    return WebViewWidget(
+      controller: WebViewController()
+        ..setJavaScriptMode(JavaScriptMode.unrestricted)
+        ..setBackgroundColor(SovereignTheme.bgDeep)
+        ..loadRequest(Uri.parse('http://localhost:8080')),
+    );
+  }
+
+  Widget _buildOfflinePlaceholder() {
+    return Container(
+      width: double.infinity,
+      decoration: const BoxDecoration(gradient: SovereignTheme.bgGradient),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const Icon(Icons.shield_outlined,
+              color: SovereignTheme.accentViolet, size: 80),
+          const SizedBox(height: 24),
+          const Text(
+            'SOVEREIGN ENGINE OFFLINE',
+            style: TextStyle(
+              color: SovereignTheme.textPrimary,
+              fontWeight: FontWeight.bold,
+              letterSpacing: 2,
+              fontSize: 18,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Waiting for Master Command Initialization...',
+            style: TextStyle(color: SovereignTheme.textMuted, fontSize: 13),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMasterOverlay() {
+    return Positioned(
+      bottom: 20,
+      left: 16,
+      right: 16,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // ── Status Bar ──
+          _buildHudStatus(),
+          const SizedBox(height: 12),
+          // ── THE MASTER BUTTON ──
+          _MasterButton(
+            isRunning: _isBotRunning,
+            onTap: _toggleMasterEngine,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildHudStatus() {
+    Color stateColor = SovereignTheme.accentCyan;
+    if (_activeState == 'MaxLimitReached') stateColor = SovereignTheme.danger;
+    if (_activeState == 'Jumping') stateColor = SovereignTheme.accentViolet;
+
+    return GlassCard(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      borderRadius: 12,
+      child: Row(
+        children: [
+          CircleAvatar(
+            radius: 4,
+            backgroundColor: _isBotRunning ? SovereignTheme.success : SovereignTheme.textMuted,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(_username.toUpperCase(),
+                    style: const TextStyle(
+                        color: SovereignTheme.textPrimary,
+                        fontSize: 10,
+                        fontWeight: FontWeight.bold)),
+                Text(_activeState,
+                    style: TextStyle(
+                        color: stateColor,
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold)),
+              ],
+            ),
+          ),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              const Text('TARGETS',
+                  style: TextStyle(color: SovereignTheme.textMuted, fontSize: 8)),
+              Text('$_targetCount',
+                  style: const TextStyle(
+                      color: SovereignTheme.textPrimary,
+                      fontSize: 14,
+                      fontWeight: FontWeight.bold)),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+class _MasterButton extends StatelessWidget {
+  final bool isRunning;
+  final VoidCallback onTap;
+
+  const _MasterButton({required this.isRunning, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
-    super.build(context);
-    return Stack(
-      children: [
-        // ── Background gradient ──
-        Container(
-          decoration: const BoxDecoration(
-            gradient: SovereignTheme.bgGradient,
-          ),
-        ),
-
-        // ── Main Content ──
-        if (_isOffline)
-          _buildOfflineState()
-        else if (_controller != null)
-          WebViewWidget(controller: _controller!),
-
-        // ── Loading shimmer ──
-        if (_isChecking)
-          _buildLoadingOverlay(),
-
-        // ── Sovereign HUD ──
-        if (!_isOffline)
-          _buildSovereignHud(),
-      ],
-    );
-  }
-
-  Widget _buildSovereignHud() {
-    return Positioned(
-      top: 80,
-      right: 16,
-      child: GlassCard(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-        borderRadius: 12,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  _hudState == 'Harvesting' ? Icons.bolt_rounded :
-                  _hudState == 'Jumping' ? Icons.rocket_launch_rounded :
-                  _hudState == 'SpeedLockWait' ? Icons.hourglass_top_rounded :
-                  _hudState == 'MaxLimitReached' ? Icons.block_flipped : Icons.pause_circle_filled_rounded,
-                  color: _hudState == 'MaxLimitReached' ? SovereignTheme.danger : SovereignTheme.accentViolet,
-                  size: 14,
-                ),
-                const SizedBox(width: 6),
-                Text(
-                  _hudState.toUpperCase(),
-                  style: TextStyle(
-                    color: _hudState == 'MaxLimitReached' ? SovereignTheme.danger : SovereignTheme.accentViolet, 
-                    fontWeight: FontWeight.bold, 
-                    fontSize: 10, 
-                    letterSpacing: 1.2
-                  ),
-                ),
-              ],
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 300),
+        height: 64,
+        decoration: BoxDecoration(
+          gradient: isRunning
+              ? const LinearGradient(colors: [Color(0xFFE91E63), Color(0xFFC2185B)]) // Crimson Red
+              : SovereignTheme.accentGradient,
+          borderRadius: BorderRadius.circular(16),
+          boxShadow: [
+            BoxShadow(
+              color: (isRunning ? Colors.red : SovereignTheme.accentViolet)
+                  .withOpacity(0.4),
+              blurRadius: 12,
+              offset: const Offset(0, 4),
             ),
-            const SizedBox(height: 8),
-            Text('👤 User: $_hudUsername', style: const TextStyle(color: SovereignTheme.textMuted, fontSize: 10)),
-            const SizedBox(height: 4),
-            Text('🎯 Targets: $_hudTargets', style: const TextStyle(color: Colors.white, fontSize: 12)),
-            const SizedBox(height: 2),
-            Text('⏳ Cooldown: ${_hudCooldown.toStringAsFixed(1)}s', style: const TextStyle(color: SovereignTheme.textMuted, fontSize: 10)),
           ],
         ),
-      ),
-    );
-  }
-
-  Widget _buildLoadingOverlay() {
-    return Container(
-      color: SovereignTheme.bgDeep,
-      child: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            SizedBox(
-              width: 56,
-              height: 56,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                valueColor: AlwaysStoppedAnimation(SovereignTheme.accentViolet),
-              ),
+            Icon(
+              isRunning ? Icons.stop_rounded : Icons.play_arrow_rounded,
+              color: Colors.white,
+              size: 32,
             ),
-            const SizedBox(height: 20),
-            const GradientText(
-              'CONNECTING TO ZYGARDE',
-              style: TextStyle(
-                fontSize: 13, letterSpacing: 2, fontWeight: FontWeight.w600,
-              ),
-            ),
-            const SizedBox(height: 8),
+            const SizedBox(width: 12),
             Text(
-              widget.url,
+              isRunning ? 'STOP ENGINE' : 'LAUNCH SOVEREIGN',
               style: const TextStyle(
-                color: SovereignTheme.textMuted, fontSize: 11,
+                color: Colors.white,
+                fontWeight: FontWeight.w900,
+                fontSize: 18,
+                letterSpacing: 1.5,
               ),
             ),
           ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildOfflineState() {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: GlassCard(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.wifi_off_rounded,
-                  color: SovereignTheme.danger, size: 48),
-              const SizedBox(height: 16),
-              const GradientText(
-                'ZYGARDE OFFLINE',
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                _error ?? 'Could not connect to ${widget.url}',
-                textAlign: TextAlign.center,
-                style: const TextStyle(
-                    color: SovereignTheme.textMuted, fontSize: 12),
-              ),
-              const SizedBox(height: 32),
-              _GlowButton(
-                label: 'LAUNCH POKÉMON GO',
-                icon: Icons.rocket_launch_rounded,
-                onTap: _launchGame,
-              ),
-              const SizedBox(height: 16),
-              TextButton.icon(
-                onPressed: _checkServerHealth,
-                icon: const Icon(Icons.refresh_rounded, color: SovereignTheme.textMuted, size: 16),
-                label: const Text('Retry Connection', style: TextStyle(color: SovereignTheme.textMuted)),
-              ),
-            ],
-          ),
         ),
       ),
     );
   }
 }
 
-// ── Shared glow button ─────────────────────────────────────────────────────────
-class _GlowButton extends StatelessWidget {
-  const _GlowButton({required this.label, required this.icon, required this.onTap});
-  final String label;
-  final IconData icon;
-  final VoidCallback onTap;
+// ── GlassCard Component ──────────────────────────────────────────────────────
+class GlassCard extends StatelessWidget {
+  final Widget child;
+  final EdgeInsets padding;
+  final double borderRadius;
+
+  const GlassCard({
+    super.key,
+    required this.child,
+    this.padding = const EdgeInsets.all(16),
+    this.borderRadius = 16,
+  });
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-        decoration: BoxDecoration(
-          gradient: SovereignTheme.accentGradient,
-          borderRadius: BorderRadius.circular(12),
-          boxShadow: [
-            BoxShadow(
-              color: SovereignTheme.accentViolet.withOpacity(0.4),
-              blurRadius: 16, spreadRadius: 0, offset: const Offset(0, 4),
-            ),
-          ],
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 16, color: Colors.white),
-            const SizedBox(width: 8),
-            Text(label,
-                style: const TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 1.2,
-                    fontSize: 13)),
-          ],
-        ),
+    return Container(
+      padding: padding,
+      decoration: BoxDecoration(
+        color: Colors.black.withOpacity(0.6),
+        borderRadius: BorderRadius.circular(borderRadius),
+        border: Border.all(color: SovereignTheme.glassBorder),
       ),
+      child: child,
     );
   }
 }

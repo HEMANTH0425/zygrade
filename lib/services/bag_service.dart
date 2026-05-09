@@ -33,6 +33,14 @@ String _activeUsername = 'Unknown';
 int _failedPingCount = 0;
 final FlutterLocalNotificationsPlugin _notifications = FlutterLocalNotificationsPlugin();
 
+// ── Bot State Globals ────────────────────────────────────────────────────────
+EngineState _currentState = EngineState.Idle;
+WebSocketChannel? _wsChannel;
+Set<String> _activeEncounters = {};
+Timer? _harvestTimer;
+int _currentRouteIdx = 0;
+List<Map<String, dynamic>> _routePoints = [];
+
 // ── Entry-point called by flutter_background_service ─────────────────────────
 @pragma('vm:entry-point')
 void onServiceStart(ServiceInstance service) async {
@@ -60,6 +68,7 @@ void onServiceStart(ServiceInstance service) async {
   service.on('runNow').listen((_) async {
     await _runBagCleanup(service);
   });
+
   service.on('updateConfig').listen((data) async {
     if (data == null) return;
     final prefs = await SharedPreferences.getInstance();
@@ -75,14 +84,53 @@ void onServiceStart(ServiceInstance service) async {
     _log(service, 'Config updated via UI.');
   });
 
+  // ── Phase 6: Master Command IPC ──
+  service.on('controlBot').listen((data) async {
+    if (data == null) return;
+    final command = data['command'] as String?;
+    
+    if (command == 'start') {
+      _log(service, '▶️ IPC: Start Engine Received.');
+      _startStateMachine(service);
+    } else if (command == 'stop') {
+      _log(service, '🛑 IPC: Stop Engine Received.');
+      _stopBot(service);
+    }
+  });
+
   // Start the background bag cleanup polling timer (60s cycle)
   await _runBagCleanup(service);
   Timer.periodic(const Duration(seconds: _kCycleSeconds), (_) async {
     await _runBagCleanup(service);
   });
+}
 
-  // Start the Reactive State Machine
-  _startStateMachine(service);
+// ── Bot Control ──────────────────────────────────────────────────────────────
+void _stopBot(ServiceInstance service) {
+  _currentState = EngineState.Idle;
+  _harvestTimer?.cancel();
+  
+  // Disable Auto-catch via WS
+  try {
+    _wsChannel?.sink.add(jsonEncode({
+      "type": "action", 
+      "action": "settings.set", 
+      "payload": {"type": "bool", "category": "Map", "name": "Auto catch all", "value": false}
+    }));
+  } catch (_) {}
+
+  _activeEncounters.clear();
+  _broadcastHud(service, 0);
+  _log(service, 'Engine Frozen. Radar Cleared.');
+}
+
+void _broadcastHud(ServiceInstance service, double cooldownRemaining) {
+  service.invoke('hudUpdate', {
+    'state': _currentState.name,
+    'targets': _activeEncounters.length,
+    'cooldown': cooldownRemaining,
+    'username': _activeUsername,
+  });
 }
 
 // ── Reactive State Machine ────────────────────────────────────────────────────
@@ -90,7 +138,7 @@ Future<void> _startStateMachine(ServiceInstance service) async {
   final prefs   = await SharedPreferences.getInstance();
   final baseUrl = prefs.getString(_kBaseUrlKey) ?? _kDefaultBase;
 
-  // 1. Initial health check & Identity Hook
+  // 1. Health check & Identity
   try {
     final response = await http
         .get(Uri.parse('$baseUrl/api/player'))
@@ -102,159 +150,39 @@ Future<void> _startStateMachine(ServiceInstance service) async {
       _log(service, '[Identity] Bound to user: $_activeUsername');
     }
   } catch (e) {
-    _log(service, '[Sentinel] Zygarde Offline. Entering Auto-Revive loop...');
+    _log(service, '[Sentinel] Zygarde Offline. Waiting for Auto-Revive loop...');
     _startAutoRevivePingLoop(service);
     return;
   }
 
-  // Load the first route available for jumping
+  // Load the route
   final routes = await RouteDatabase.instance.getAllRoutes();
-  List<Map<String, dynamic>> routePoints = [];
   if (routes.isNotEmpty) {
     try {
-      routePoints = List<Map<String, dynamic>>.from(jsonDecode(routes.first['rawData']));
+      _routePoints = List<Map<String, dynamic>>.from(jsonDecode(routes.first['rawData']));
     } catch (_) {}
   }
-  int currentRouteIdx = 0;
+  _currentRouteIdx = 0;
 
   final wsUrl = baseUrl
       .replaceFirst('http://', 'ws://')
       .replaceFirst('https://', 'wss://') + '/ws';
 
-  WebSocketChannel? channel;
   try {
-    channel = WebSocketChannel.connect(Uri.parse(wsUrl));
-    _failedPingCount = 0; // Reset on successful connect
+    _wsChannel?.sink.close(); // Close existing if any
+    _wsChannel = WebSocketChannel.connect(Uri.parse(wsUrl));
+    _failedPingCount = 0;
   } catch (e) {
-    _log(service, '[Sentinel] WS Connect failed. Retrying in 10s...');
-    await Future.delayed(const Duration(seconds: 10));
+    _log(service, '[Sentinel] WS Connect failed. Retrying in 5s...');
+    await Future.delayed(const Duration(seconds: 5));
     _startStateMachine(service);
     return;
   }
 
-  Set<String> activeEncounters = {};
-  EngineState currentState = EngineState.Idle;
-  Timer? harvestTimer;
-
-  // Function to broadcast HUD state to the UI
-  void broadcastHud(double cooldownRemaining) {
-    service.invoke('hudUpdate', {
-      'state': currentState.name,
-      'targets': activeEncounters.length,
-      'cooldown': cooldownRemaining,
-      'username': _activeUsername,
-    });
-  }
-
-  void transitionTo(EngineState newState, [double cooldown = 0]) {
-    currentState = newState;
-    broadcastHud(cooldown);
-  }
-
-  Future<void> _showLimitNotification(int limit) async {
-    const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
-      'sovereign_alerts',
-      'Sovereign Alerts',
-      importance: Importance.high,
-      priority: Priority.high,
-      enableVibration: false,
-      playSound: true,
-      ticker: 'ticker',
-    );
-    const NotificationDetails details = NotificationDetails(android: androidDetails);
-    await _notifications.show(
-      999,
-      '🛑 SOVEREIGN HALTED',
-      'Daily Limit ($limit) Reached for $_activeUsername',
-      details,
-    );
-  }
-
-  // The main machine loop mechanism
-  Future<void> triggerStateLogic() async {
-    if (currentState == EngineState.Jumping) {
-      // Dynamic Killswitch Check
-      final dailyLimit = prefs.getInt(_kCatchLimitKey) ?? 4500;
-      final dailyCatches = await RouteDatabase.instance.getDailyCatches(_activeUsername);
-      if (dailyCatches >= dailyLimit) {
-        _log(service, '🛑 LIMIT REACHED: $dailyCatches/$dailyLimit for $_activeUsername');
-        transitionTo(EngineState.MaxLimitReached);
-        await _showLimitNotification(dailyLimit);
-        
-        // Turn Auto-catch OFF
-        try {
-          channel?.sink.add(jsonEncode({
-            "type": "action", 
-            "action": "settings.set", 
-            "payload": {"type": "bool", "category": "Map", "name": "Auto catch all", "value": false}
-          }));
-        } catch (_) {}
-        return;
-      }
-
-      if (routePoints.isEmpty) {
-        _log(service, 'No route loaded. Staying idle.');
-        transitionTo(EngineState.Idle);
-        return;
-      }
-      
-      final nextPoint = routePoints[currentRouteIdx];
-      currentRouteIdx = (currentRouteIdx + 1) % routePoints.length;
-      final cooldownSec = (nextPoint['cooldown'] as num?)?.toDouble() ?? 0.0;
-      final lat = nextPoint['lat'] as double;
-      final lng = nextPoint['lng'] as double;
-
-      _log(service, '⚡ Jumping to $lat, $lng');
-      
-      try {
-        channel?.sink.add(jsonEncode({
-          'type': 'action',
-          'action': 'location.set',
-          'requestId': DateTime.now().millisecondsSinceEpoch.toString(),
-          'payload': {'lat': lat, 'lng': lng}
-        }));
-        
-        channel?.sink.add(jsonEncode({
-          "type": "action", 
-          "action": "settings.set", 
-          "payload": {"type": "bool", "category": "Map", "name": "Auto catch all", "value": false}
-        }));
-      } catch (e) {
-        _log(service, 'Failed to send jump commands: $e');
-      }
-
-      transitionTo(EngineState.SpeedLockWait, cooldownSec);
-      await Future.delayed(Duration(milliseconds: (cooldownSec * 1000).toInt()));
-      
-      try {
-        channel?.sink.add(jsonEncode({
-          "type": "action", 
-          "action": "settings.set", 
-          "payload": {"type": "bool", "category": "Map", "name": "Auto catch all", "value": true}
-        }));
-      } catch (_) {}
-      
-      transitionTo(EngineState.Harvesting);
-      
-      harvestTimer?.cancel();
-      harvestTimer = Timer(const Duration(seconds: 45), () {
-        if (currentState == EngineState.Harvesting) {
-          _log(service, 'Harvest Failsafe triggered. Forcing jump.');
-          transitionTo(EngineState.Jumping);
-          triggerStateLogic();
-        }
-      });
-      
-      if (activeEncounters.isEmpty) {
-        harvestTimer?.cancel();
-        transitionTo(EngineState.Jumping);
-        triggerStateLogic();
-      }
-    }
-  }
-
   // Listen to WebSocket
-  channel.stream.listen((message) {
+  _wsChannel?.stream.listen((message) {
+    if (_currentState == EngineState.Idle) return;
+
     try {
       final decoded = jsonDecode(message);
       
@@ -265,8 +193,8 @@ Future<void> _startStateMachine(ServiceInstance service) async {
         if (payload['pokemon'] != null) {
           for (var p in payload['pokemon']) {
             final id = p['encounter_id'].toString();
-            if (!activeEncounters.contains(id)) {
-              activeEncounters.add(id);
+            if (!_activeEncounters.contains(id)) {
+              _activeEncounters.add(id);
               changed = true;
             }
           }
@@ -275,49 +203,135 @@ Future<void> _startStateMachine(ServiceInstance service) async {
         if (payload['removed_pokemon'] != null) {
           for (var p in payload['removed_pokemon']) {
             final id = p.toString();
-            if (activeEncounters.contains(id)) {
-              activeEncounters.remove(id);
+            if (_activeEncounters.contains(id)) {
+              _activeEncounters.remove(id);
               changed = true;
               
-              // ── Phase 5.1 Catch Counting Logic ──
-              // If removed while harvesting, it's a catch attempt (success assumed by removal)
-              if (currentState == EngineState.Harvesting) {
+              if (_currentState == EngineState.Harvesting) {
                 RouteDatabase.instance.insertCatch(_activeUsername, DateTime.now().millisecondsSinceEpoch);
-                // _log(service, '🎯 Catch logged for $_activeUsername');
               }
             }
           }
         }
         
         if (changed) {
-          broadcastHud(0);
-          if (currentState == EngineState.Harvesting && activeEncounters.isEmpty) {
-            harvestTimer?.cancel();
-            transitionTo(EngineState.Jumping);
-            triggerStateLogic();
+          _broadcastHud(service, 0);
+          if (_currentState == EngineState.Harvesting && _activeEncounters.isEmpty) {
+            _harvestTimer?.cancel();
+            _transitionTo(service, EngineState.Jumping);
+            _triggerStateLogic(service, prefs);
           }
         }
       }
-    } catch (e) {
-      // ignore
-    }
+    } catch (e) {}
   }, onDone: () {
-    _log(service, 'WebSocket closed. Entering Auto-Revive ping loop...');
-    _startAutoRevivePingLoop(service);
+    if (_currentState != EngineState.Idle) {
+      _log(service, 'WebSocket closed. Entering Auto-Revive loop...');
+      _startAutoRevivePingLoop(service);
+    }
   }, onError: (err) {
-    _log(service, 'WebSocket error: $err. Entering Auto-Revive ping loop...');
-    _startAutoRevivePingLoop(service);
+    if (_currentState != EngineState.Idle) {
+      _log(service, 'WebSocket error: $err. Entering Auto-Revive loop...');
+      _startAutoRevivePingLoop(service);
+    }
   });
 
-  if (routePoints.isNotEmpty) {
-    transitionTo(EngineState.Jumping);
-    triggerStateLogic();
+  if (_routePoints.isNotEmpty) {
+    _transitionTo(service, EngineState.Jumping);
+    _triggerStateLogic(service, prefs);
   } else {
-    transitionTo(EngineState.Idle);
+    _transitionTo(service, EngineState.Idle);
   }
 }
 
-// ── Auto-Revive Logic (Phase 5) ───────────────────────────────────────────────
+void _transitionTo(ServiceInstance service, EngineState newState, [double cooldown = 0]) {
+  _currentState = newState;
+  _broadcastHud(service, cooldown);
+}
+
+Future<void> _triggerStateLogic(ServiceInstance service, SharedPreferences prefs) async {
+  if (_currentState == EngineState.Jumping) {
+    // Killswitch Check
+    final dailyLimit = prefs.getInt(_kCatchLimitKey) ?? 4500;
+    final dailyCatches = await RouteDatabase.instance.getDailyCatches(_activeUsername);
+    if (dailyCatches >= dailyLimit) {
+      _log(service, '🛑 LIMIT REACHED: $dailyCatches/$dailyLimit for $_activeUsername');
+      _transitionTo(service, EngineState.MaxLimitReached);
+      _showLimitNotification(dailyLimit);
+      
+      try {
+        _wsChannel?.sink.add(jsonEncode({
+          "type": "action", 
+          "action": "settings.set", 
+          "payload": {"type": "bool", "category": "Map", "name": "Auto catch all", "value": false}
+        }));
+      } catch (_) {}
+      return;
+    }
+
+    if (_routePoints.isEmpty) {
+      _transitionTo(service, EngineState.Idle);
+      return;
+    }
+    
+    final nextPoint = _routePoints[_currentRouteIdx];
+    _currentRouteIdx = (_currentRouteIdx + 1) % _routePoints.length;
+    final cooldownSec = (nextPoint['cooldown'] as num?)?.toDouble() ?? 0.0;
+    final lat = nextPoint['lat'] as double;
+    final lng = nextPoint['lng'] as double;
+
+    _log(service, '⚡ Jumping to $lat, $lng');
+    
+    try {
+      _wsChannel?.sink.add(jsonEncode({
+        'type': 'action',
+        'action': 'location.set',
+        'requestId': DateTime.now().millisecondsSinceEpoch.toString(),
+        'payload': {'lat': lat, 'lng': lng}
+      }));
+      
+      _wsChannel?.sink.add(jsonEncode({
+        "type": "action", 
+        "action": "settings.set", 
+        "payload": {"type": "bool", "category": "Map", "name": "Auto catch all", "value": false}
+      }));
+    } catch (e) {
+      _log(service, 'Failed to send jump commands: $e');
+    }
+
+    _transitionTo(service, EngineState.SpeedLockWait, cooldownSec);
+    await Future.delayed(Duration(milliseconds: (cooldownSec * 1000).toInt()));
+    
+    if (_currentState == EngineState.Idle) return;
+
+    try {
+      _wsChannel?.sink.add(jsonEncode({
+        "type": "action", 
+        "action": "settings.set", 
+        "payload": {"type": "bool", "category": "Map", "name": "Auto catch all", "value": true}
+      }));
+    } catch (_) {}
+    
+    _transitionTo(service, EngineState.Harvesting);
+    
+    _harvestTimer?.cancel();
+    _harvestTimer = Timer(const Duration(seconds: 45), () {
+      if (_currentState == EngineState.Harvesting) {
+        _log(service, 'Harvest Failsafe triggered. Forcing jump.');
+        _transitionTo(service, EngineState.Jumping);
+        _triggerStateLogic(service, prefs);
+      }
+    });
+    
+    if (_activeEncounters.isEmpty) {
+      _harvestTimer?.cancel();
+      _transitionTo(service, EngineState.Jumping);
+      _triggerStateLogic(service, prefs);
+    }
+  }
+}
+
+// ── Auto-Revive Logic ────────────────────────────────────────────────────────
 Future<void> _startAutoRevivePingLoop(ServiceInstance service) async {
   final prefs   = await SharedPreferences.getInstance();
   final baseUrl = prefs.getString(_kBaseUrlKey) ?? _kDefaultBase;
@@ -325,13 +339,17 @@ Future<void> _startAutoRevivePingLoop(ServiceInstance service) async {
   _failedPingCount = 0;
   
   Timer.periodic(const Duration(seconds: 5), (timer) async {
+    if (_currentState == EngineState.Idle) {
+      timer.cancel();
+      return;
+    }
+
     try {
       final response = await http
           .get(Uri.parse(baseUrl))
           .timeout(const Duration(seconds: 2));
       
       if (response.statusCode == 200) {
-        // Server is back!
         timer.cancel();
         _log(service, '[Auto-Revive] Server detected. Reconnecting...');
         _startStateMachine(service);
@@ -346,32 +364,24 @@ Future<void> _startAutoRevivePingLoop(ServiceInstance service) async {
         _log(service, '⚠️ Game Crash Detected. Firing SU Hard-Reset & Auto-Revive...');
         _failedPingCount = 0;
         
-        // 1. Root Hard-Kill
         try {
           await Process.run('su', ['-c', 'am force-stop com.nianticlabs.pokemongo']);
-          _log(service, '  ✓ Force-stopped game via SU');
-        } catch (e) {
-          _log(service, '  ✗ SU Force-stop failed (device not rooted?): $e');
-        }
+        } catch (_) {}
 
-        // 2. Launch Pokémon GO
         try {
           const intent = AndroidIntent(
             action: 'android.intent.action.MAIN',
             package: 'com.nianticlabs.pokemongo',
-            componentName: 'com.nianticlabs.pokemongo.UnityMainActivity',
             flags: <int>[Flag.FLAG_ACTIVITY_NEW_TASK],
           );
           await intent.launch();
-        } catch (e) {
-          _log(service, '  ✗ Auto-Revive launch failed: $e');
-        }
+        } catch (_) {}
       }
     }
   });
 }
 
-// ── Independent Bag Cleanup Cycle ─────────────────────────────────────────────
+// ── Bag Cleanup ─────────────────────────────────────────────────────────────
 Future<void> _runBagCleanup(ServiceInstance service) async {
   final prefs   = await SharedPreferences.getInstance();
   final baseUrl = prefs.getString(_kBaseUrlKey) ?? _kDefaultBase;
@@ -384,14 +394,6 @@ Future<void> _runBagCleanup(ServiceInstance service) async {
   } catch (_) {}
 
   if (limits.isEmpty) return;
-
-  try {
-    await http
-        .get(Uri.parse('$baseUrl/api/player'))
-        .timeout(const Duration(seconds: 2));
-  } catch (_) {
-    return;
-  }
 
   try {
     final response = await http
@@ -417,11 +419,7 @@ Future<void> _runBagCleanup(ServiceInstance service) async {
       _log(service, '[${_ts()}] Cleaning ${trashList.length} type(s)...');
       await _discardViaWebSocket(baseUrl, trashList, service);
     }
-    service.invoke('cycleResult', {'log': prefs.getString(_kLogKey) ?? ''});
-
-  } catch (e) {
-    _log(service, '[${_ts()}] ✗ Bag Cycle failed: $e');
-  }
+  } catch (_) {}
 }
 
 Future<void> _discardViaWebSocket(
@@ -449,28 +447,19 @@ Future<void> _discardViaWebSocket(
           }
         });
         channel.sink.add(payload);
-        _log(service, '  ✓ Discarded ${entry["excess"]}x ${entry["name"]}');
         await Future.delayed(const Duration(milliseconds: 100));
-      } on WebSocketChannelException catch (e) {
-        _log(service, '  ✗ Game crashed or socket dropped: $e');
-        break;
-      } catch (e) {
-        _log(service, '  ✗ Error during discard: $e');
+      } catch (_) {
         break;
       }
     }
-  } catch (e) {
-    _log(service, '  ✗ WebSocket error: $e');
+  } catch (_) {
   } finally {
     await channel?.sink.close();
   }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-String _ts() {
-  final now = DateTime.now();
-  return '${now.hour.toString().padLeft(2,'0')}:${now.minute.toString().padLeft(2,'0')}:${now.second.toString().padLeft(2,'0')}';
-}
+String _ts() => '${DateTime.now().hour.toString().padLeft(2,'0')}:${DateTime.now().minute.toString().padLeft(2,'0')}:${DateTime.now().second.toString().padLeft(2,'0')}';
 
 Future<void> _log(ServiceInstance service, String msg) async {
   final prefs   = await SharedPreferences.getInstance();
@@ -480,6 +469,25 @@ Future<void> _log(ServiceInstance service, String msg) async {
   if (lines.length > _kMaxLogLines) lines.removeRange(0, lines.length - _kMaxLogLines);
   await prefs.setString(_kLogKey, lines.join('\n'));
   service.invoke('logLine', {'msg': msg});
+}
+
+Future<void> _showLimitNotification(int limit) async {
+  const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
+    'sovereign_alerts',
+    'Sovereign Alerts',
+    importance: Importance.high,
+    priority: Priority.high,
+    enableVibration: false,
+    playSound: true,
+    ticker: 'ticker',
+  );
+  const NotificationDetails details = NotificationDetails(android: androidDetails);
+  await _notifications.show(
+    999,
+    '🛑 SOVEREIGN HALTED',
+    'Daily Limit ($limit) Reached for $_activeUsername',
+    details,
+  );
 }
 
 Future<void> initBagService() async {
