@@ -72,6 +72,7 @@ void main() async {
     systemNavigationBarColor : SovereignTheme.bgDeep,
   ));
 
+  print('[SOVEREIGN] 🦖 App Starting... Initializing BagService');
   // Start background bag daemon
   await initBagService();
 
@@ -79,8 +80,34 @@ void main() async {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-class SovereignApp extends StatelessWidget {
+class SovereignApp extends StatefulWidget {
   const SovereignApp({super.key});
+
+  @override
+  State<SovereignApp> createState() => _SovereignAppState();
+}
+
+class _SovereignAppState extends State<SovereignApp> {
+  @override
+  void initState() {
+    super.initState();
+    _loadTheme();
+  }
+
+  Future<void> _loadTheme() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      SovereignTheme.isGhostMode = prefs.getBool('ghost_mode') ?? false;
+    });
+  }
+
+  void _toggleTheme() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      SovereignTheme.isGhostMode = !SovereignTheme.isGhostMode;
+      prefs.setBool('ghost_mode', SovereignTheme.isGhostMode);
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -88,14 +115,15 @@ class SovereignApp extends StatelessWidget {
       title       : 'Sovereign Mobile',
       theme       : SovereignTheme.theme,
       debugShowCheckedModeBanner: false,
-      home        : const _MainShell(),
+      home        : _MainShell(onThemeToggle: _toggleTheme),
     );
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 class _MainShell extends StatefulWidget {
-  const _MainShell();
+  final VoidCallback onThemeToggle;
+  const _MainShell({required this.onThemeToggle});
 
   @override
   State<_MainShell> createState() => _MainShellState();
@@ -104,25 +132,20 @@ class _MainShell extends StatefulWidget {
 class _MainShellState extends State<_MainShell> {
   int _currentIndex = 0;
 
-  static const _kZygardeUrl = 'http://localhost:8080';
-  // ↑ Change to your PC's LAN IP (e.g. http://192.168.1.50:8080)
-  //   if Zygarde is running on your PC rather than on-device.
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: SovereignTheme.bgDeep,
+      backgroundColor: SovereignTheme.currentBg,
       extendBodyBehindAppBar: true,
 
-      appBar: const PreferredSize(
-        preferredSize: Size.fromHeight(60),
-        child: _SovereignAppBar(),
+      appBar: PreferredSize(
+        preferredSize: const Size.fromHeight(60),
+        child: _SovereignAppBar(onToggle: widget.onThemeToggle),
       ),
 
       body: IndexedStack(
         index: _currentIndex,
         children: const [
-          WebViewScreen(url: _kZygardeUrl),
           BagLogicScreen(),
           RouteMasterScreen(),
         ],
@@ -130,23 +153,27 @@ class _MainShellState extends State<_MainShell> {
       
       bottomNavigationBar: Container(
         decoration: BoxDecoration(
-          color: SovereignTheme.bgDeep,
+          color: SovereignTheme.currentBg,
           border: const Border(top: BorderSide(color: SovereignTheme.glassBorder)),
         ),
         child: BottomNavigationBar(
-          backgroundColor: SovereignTheme.bgDeep,
+          backgroundColor: SovereignTheme.currentBg,
           selectedItemColor: SovereignTheme.accentViolet,
           unselectedItemColor: Colors.white54,
           currentIndex: _currentIndex,
+          type: BottomNavigationBarType.fixed,
           onTap: (index) {
-            setState(() {
-              _currentIndex = index;
-            });
+            setState(() => _currentIndex = index);
           },
           items: const [
-            BottomNavigationBarItem(icon: Icon(Icons.map_rounded), label: 'Dashboard'),
-            BottomNavigationBarItem(icon: Icon(Icons.inventory_2_rounded), label: 'Bag Manager'),
-            BottomNavigationBarItem(icon: Icon(Icons.route_rounded), label: 'Route Master'),
+            BottomNavigationBarItem(
+              icon: Icon(Icons.inventory_2_rounded),
+              label: 'Bag Logic',
+            ),
+            BottomNavigationBarItem(
+              icon: Icon(Icons.route_rounded),
+              label: 'Routes',
+            ),
           ],
         ),
       ),
@@ -158,7 +185,8 @@ class _MainShellState extends State<_MainShell> {
 // Custom AppBar with glassmorphic blur backdrop
 // ─────────────────────────────────────────────────────────────────────────────
 class _SovereignAppBar extends StatelessWidget {
-  const _SovereignAppBar();
+  final VoidCallback onToggle;
+  const _SovereignAppBar({required this.onToggle});
 
   @override
   Widget build(BuildContext context) {
@@ -167,7 +195,7 @@ class _SovereignAppBar extends StatelessWidget {
         filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
         child: Container(
           decoration: BoxDecoration(
-            color: SovereignTheme.bgDeep.withOpacity(0.7),
+            color: SovereignTheme.currentBg.withOpacity(0.7),
             border: const Border(
               bottom: BorderSide(color: SovereignTheme.glassBorder),
             ),
@@ -178,7 +206,7 @@ class _SovereignAppBar extends StatelessWidget {
               children: [
                 // ── Title row ──
                 Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 10, 20, 10),
+                  padding: const EdgeInsets.fromLTRB(20, 10, 10, 10),
                   child: Row(
                     children: [
                       // Animated violet dot
@@ -198,6 +226,16 @@ class _SovereignAppBar extends StatelessWidget {
                         ),
                       ),
                       const Spacer(),
+                      // Ghost mode toggle
+                      IconButton(
+                        icon: Icon(
+                          SovereignTheme.isGhostMode ? Icons.auto_awesome : Icons.shield_moon_outlined,
+                          color: SovereignTheme.isGhostMode ? SovereignTheme.accentCyan : Colors.white70,
+                          size: 20,
+                        ),
+                        onPressed: onToggle,
+                        tooltip: 'Toggle Ghost Mode',
+                      ),
                       // Daemon status chip
                       _StatusChip(),
                     ],

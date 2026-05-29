@@ -9,16 +9,19 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:android_intent_plus/android_intent.dart';
 import 'package:android_intent_plus/flag.dart';
 import 'package:webview_flutter/webview_flutter.dart';
+import '../models/zygarde_config.dart';
 
 import '../theme/sovereign_theme.dart';
 
 class WebViewScreen extends StatefulWidget {
-  const WebViewScreen({super.key});
+  final String? url;
+  const WebViewScreen({super.key, this.url});
 
   @override
   State<WebViewScreen> createState() => _WebViewScreenState();
@@ -26,19 +29,54 @@ class WebViewScreen extends StatefulWidget {
 
 class _WebViewScreenState extends State<WebViewScreen> {
   // ── State ──────────────────────────────────────────────────────────────────
-  WebViewController? _controller;
+  late final WebViewController _controller;
   bool _isZygardeUp     = false;
   bool _isBotRunning    = false;
   String _activeState   = 'Idle';
   String _username      = 'Unknown';
   int _targetCount      = 0;
+  bool _isLoading       = true;
+  bool _hasError        = false;
   
   // ── HUD Sync ───────────────────────────────────────────────────────────────
   @override
   void initState() {
     super.initState();
+    _controller = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setBackgroundColor(SovereignTheme.currentBg)
+      ..setNavigationDelegate(
+        NavigationDelegate(
+          onPageStarted: (_) => setState(() { _isLoading = true; _hasError = false; }),
+          onPageFinished: (_) async {
+            setState(() { _isLoading = false; _isZygardeUp = true; });
+            // Auto-sync when page is ready
+            await _injectLatestConfig();
+          },
+          onWebResourceError: (error) {
+            debugPrint('Sovereign: Web Error: ${error.description}');
+            setState(() {
+              _isLoading = false;
+              _hasError = true;
+              _isZygardeUp = false;
+            });
+          },
+        ),
+      )
+      ..loadRequest(Uri.parse(widget.url ?? 'http://localhost:8080'));
+
     _listenToHudUpdates();
-    _checkServerStatus();
+    _listenToSyncEvents();
+    _listenToForceSync();
+    _startServerPolling();
+  }
+
+  void _listenToForceSync() {
+    FlutterBackgroundService().on('forceSync').listen((data) async {
+      if (mounted) {
+        _injectLatestConfig();
+      }
+    });
   }
 
   void _listenToHudUpdates() {
@@ -49,7 +87,6 @@ class _WebViewScreenState extends State<WebViewScreen> {
           _username    = data['username'] ?? 'Unknown';
           _targetCount = data['targets'] ?? 0;
           
-          // Sync bot running state based on background state machine
           if (_activeState == 'Idle' || _activeState == 'MaxLimitReached') {
             _isBotRunning = false;
           } else {
@@ -60,16 +97,54 @@ class _WebViewScreenState extends State<WebViewScreen> {
     });
   }
 
-  Future<void> _checkServerStatus() async {
-    // Simple polling for the local 8080 server
-    Timer.periodic(const Duration(seconds: 3), (timer) {
+  void _listenToSyncEvents() {
+    FlutterBackgroundService().on('syncZygarde').listen((data) async {
+      if (data != null && mounted) {
+        debugPrint('Sovereign: Received sync event: $data');
+        await _injectZygardeSettings(data);
+      }
+    });
+  }
+
+  Future<void> _injectLatestConfig() async {
+    try {
+      // Get the latest config from service/storage
+      // In a real scenario, we'd fetch this from SharedPreferences or a global state
+      // For now, we'll invoke a request to the service to send us the config
+      FlutterBackgroundService().invoke('requestConfigSync');
+    } catch (e) {
+      debugPrint('Sovereign: Initial sync request failed: $e');
+    }
+  }
+
+  Future<void> _injectZygardeSettings(Map<String, dynamic> settings) async {
+    final config = ZygardeConfig.fromJson(settings);
+    final String js = config.toJSInjection();
+
+    debugPrint('Sovereign: Injecting Zygarde Settings (Manual/Auto)...');
+    try {
+      final result = await _controller.runJavaScriptReturningResult(js);
+      debugPrint('Sovereign: Injection result: $result');
+    } catch (e) {
+      debugPrint('Sovereign: Injection failed: $e');
+    }
+  }
+
+  void _startServerPolling() {
+    // If we have an error, try to reload every 5 seconds
+    Timer.periodic(const Duration(seconds: 5), (timer) {
       if (!mounted) {
         timer.cancel();
         return;
       }
-      // Note: In a real app, use a proper health-check. 
-      // For this UI, the background service already does this.
+      if (_hasError) {
+        _reload();
+      }
     });
+  }
+
+  void _reload() {
+    _controller.loadRequest(Uri.parse(widget.url ?? 'http://localhost:8080'));
   }
 
   // ── Master Control Actions ─────────────────────────────────────────────────
@@ -86,18 +161,14 @@ class _WebViewScreenState extends State<WebViewScreen> {
 
     // 1. Launch Pokémon GO
     try {
-      const intent = AndroidIntent(
-        action: 'android.intent.action.MAIN',
-        package: 'com.nianticlabs.pokemongo',
-        flags: <int>[Flag.FLAG_ACTIVITY_NEW_TASK],
-      );
-      await intent.launch();
+      await Process.run('su', [
+        '-c', 
+        'monkey -p com.nianticlabs.pokemongo -c android.intent.category.LAUNCHER 1'
+      ]);
+      // Give it a moment then try to reload the webview
+      Future.delayed(const Duration(seconds: 10), _reload);
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Could not launch Pokémon GO. Is it installed?')),
-        );
-      }
+      debugPrint('Sovereign: Launch error: $e');
     }
 
     // 2. Fire IPC to Start Bot
@@ -106,46 +177,58 @@ class _WebViewScreenState extends State<WebViewScreen> {
 
   void _stopEngine() {
     setState(() => _isBotRunning = false);
-
-    // Fire IPC to Stop Bot
     FlutterBackgroundService().invoke('controlBot', {'command': 'stop'});
   }
 
   // ── Build ──────────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
+    // Detect if this is the dedicated WebUI tab (widget.url might be provided or we can check index)
+    // For now, let's just make it look consistent.
     return Scaffold(
-      backgroundColor: SovereignTheme.bgDeep,
+      backgroundColor: SovereignTheme.currentBg,
       body: Stack(
         children: [
           // ── The WebView Layer ──
           _buildWebViewLayer(),
 
-          // ── Bottom Master Controller (PGTools Style) ──
-          _buildMasterOverlay(),
+          // ── Bottom Master Controller ──
+          if (widget.url == null) _buildMasterOverlay(),
+          
+          // ── Floating Refresh for dedicated WebUI ──
+          if (widget.url != null) 
+            Positioned(
+              right: 16,
+              bottom: 16,
+              child: FloatingActionButton.small(
+                onPressed: _reload,
+                backgroundColor: SovereignTheme.accentViolet.withOpacity(0.7),
+                child: const Icon(Icons.refresh_rounded, color: Colors.white),
+              ),
+            ),
         ],
       ),
     );
   }
 
   Widget _buildWebViewLayer() {
-    // If bot isn't running, show the offline state
-    if (!_isBotRunning && _activeState != 'Harvesting') {
+    if (_hasError) {
       return _buildOfflinePlaceholder();
     }
 
-    return WebViewWidget(
-      controller: WebViewController()
-        ..setJavaScriptMode(JavaScriptMode.unrestricted)
-        ..setBackgroundColor(SovereignTheme.bgDeep)
-        ..loadRequest(Uri.parse('http://localhost:8080')),
+    return Stack(
+      children: [
+        WebViewWidget(controller: _controller),
+        if (_isLoading)
+          const Center(child: CircularProgressIndicator(color: SovereignTheme.accentViolet)),
+      ],
     );
   }
 
   Widget _buildOfflinePlaceholder() {
     return Container(
       width: double.infinity,
-      decoration: const BoxDecoration(gradient: SovereignTheme.bgGradient),
+      decoration: BoxDecoration(gradient: SovereignTheme.bgGradient),
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
@@ -153,7 +236,7 @@ class _WebViewScreenState extends State<WebViewScreen> {
               color: SovereignTheme.accentViolet, size: 80),
           const SizedBox(height: 24),
           const Text(
-            'SOVEREIGN ENGINE OFFLINE',
+            'ZYGARDE SERVER OFFLINE',
             style: TextStyle(
               color: SovereignTheme.textPrimary,
               fontWeight: FontWeight.bold,
@@ -163,8 +246,14 @@ class _WebViewScreenState extends State<WebViewScreen> {
           ),
           const SizedBox(height: 8),
           Text(
-            'Waiting for Master Command Initialization...',
+            'Waiting for Pokemon GO to initialize the engine...',
             style: TextStyle(color: SovereignTheme.textMuted, fontSize: 13),
+          ),
+          const SizedBox(height: 24),
+          TextButton.icon(
+            onPressed: _reload,
+            icon: const Icon(Icons.refresh_rounded, color: SovereignTheme.accentCyan),
+            label: const Text('RETRY CONNECTION', style: TextStyle(color: SovereignTheme.accentCyan)),
           ),
         ],
       ),

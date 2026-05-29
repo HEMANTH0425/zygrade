@@ -57,12 +57,20 @@ void onServiceStart(ServiceInstance service) async {
       service.setAsForegroundService();
     });
     service.on('setAsBackground').listen((_) {
-      service.setAsBackground();
+      service.setAsBackgroundService();
     });
     service.setForegroundNotificationInfo(
       title: 'Sovereign Sentinel',
       content: 'The Warden is Active...',
     );
+  }
+
+  // 3. Request Root Access proactively
+  try {
+    _log(service, '🔐 🦖 Requesting Root Access...');
+    await Process.run('su', ['-c', 'id']);
+  } catch (e) {
+    _log(service, '❌ 🦖 Root Access Request Failed: $e');
   }
 
   service.on('stopService').listen((_) => service.stopSelf());
@@ -82,7 +90,22 @@ void onServiceStart(ServiceInstance service) async {
     if (data['catchLimit'] != null) {
       await prefs.setInt(_kCatchLimitKey, data['catchLimit'] as int);
     }
-    _log(service, 'Config updated via UI.');
+    if (data['zygardeConfig'] != null) {
+      final config = data['zygardeConfig'] as Map<String, dynamic>;
+      await prefs.setString('zygarde_full_config', jsonEncode(config));
+      // 🔥 TRIGGER IMMEDIATE PUSH
+      _pushAllSettingsToEngine(config, service);
+    }
+    _log(service, 'Config updated & Syncing to Engine...');
+  });
+
+  service.on('requestConfigSync').listen((_) async {
+    final prefs = await SharedPreferences.getInstance();
+    final configJson = prefs.getString('zygarde_full_config');
+    if (configJson != null) {
+      _log(service, '🔄 Auto-Syncing Zygarde Configuration...');
+      service.invoke('syncZygarde', jsonDecode(configJson));
+    }
   });
 
   // ── Phase 6: Master Command IPC ──
@@ -97,6 +120,25 @@ void onServiceStart(ServiceInstance service) async {
       _log(service, '🛑 IPC: Stop Engine Received.');
       _stopBot(service);
     }
+  });
+
+  service.on('syncZygarde').listen((data) async {
+    if (data == null) return;
+    _log(service, '🔄 IPC: Syncing Zygarde Settings...');
+    
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('zygarde_full_config', jsonEncode(data));
+    
+    // ── Actually Push to Zygarde Engine via WebSocket ──
+    _pushAllSettingsToEngine(data, service);
+  });
+
+  service.on('selectRoute').listen((data) async {
+    if (data == null) return;
+    final int routeId = data['id'] as int;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt('selected_route_id', routeId);
+    _log(service, 'Selected Route ID: $routeId');
   });
 
   // Start the background bag cleanup polling timer (60s cycle)
@@ -157,11 +199,29 @@ Future<void> _startStateMachine(ServiceInstance service) async {
   }
 
   // Load the route
+  final selectedId = prefs.getInt('selected_route_id');
   final routes = await RouteDatabase.instance.getAllRoutes();
+  
   if (routes.isNotEmpty) {
-    try {
-      _routePoints = List<Map<String, dynamic>>.from(jsonDecode(routes.first['rawData']));
-    } catch (_) {}
+    Map<String, dynamic>? targetRoute;
+    if (selectedId != null) {
+      try {
+        targetRoute = routes.firstWhere((r) => r['id'] == selectedId);
+      } catch (_) {
+        targetRoute = routes.first;
+      }
+    } else {
+      targetRoute = routes.first;
+    }
+
+    if (targetRoute != null) {
+      try {
+        _routePoints = List<Map<String, dynamic>>.from(jsonDecode(targetRoute['rawData']));
+        _log(service, 'Loaded route: ${targetRoute['name']} with ${_routePoints.length} points.');
+      } catch (e) {
+        _log(service, 'Error parsing route data: $e');
+      }
+    }
   }
   _currentRouteIdx = 0;
 
@@ -209,7 +269,9 @@ Future<void> _startStateMachine(ServiceInstance service) async {
               changed = true;
               
               if (_currentState == EngineState.Harvesting) {
-                RouteDatabase.instance.insertCatch(_activeUsername, DateTime.now().millisecondsSinceEpoch);
+                // --- NEW: Trigger transition immediately on catch ---
+                _finishCatchAndCoolDown(service, _routePoints[_currentRouteIdx], false);
+                break; // One catch per jump logic
               }
             }
           }
@@ -217,11 +279,6 @@ Future<void> _startStateMachine(ServiceInstance service) async {
         
         if (changed) {
           _broadcastHud(service, 0);
-          if (_currentState == EngineState.Harvesting && _activeEncounters.isEmpty) {
-            _harvestTimer?.cancel();
-            _transitionTo(service, EngineState.Jumping);
-            _triggerStateLogic(service, prefs);
-          }
         }
       }
     } catch (e) {}
@@ -252,21 +309,14 @@ void _transitionTo(ServiceInstance service, EngineState newState, [double cooldo
 
 Future<void> _triggerStateLogic(ServiceInstance service, SharedPreferences prefs) async {
   if (_currentState == EngineState.Jumping) {
-    // Killswitch Check
+    // 1. Killswitch Check
     final dailyLimit = prefs.getInt(_kCatchLimitKey) ?? 4500;
     final dailyCatches = await RouteDatabase.instance.getDailyCatches(_activeUsername);
     if (dailyCatches >= dailyLimit) {
-      _log(service, '🛑 LIMIT REACHED: $dailyCatches/$dailyLimit for $_activeUsername');
+      _log(service, '🛑 LIMIT REACHED: $dailyCatches/$dailyLimit. Shutting down.');
       _transitionTo(service, EngineState.MaxLimitReached);
       _showLimitNotification(dailyLimit);
-      
-      try {
-        _wsChannel?.sink.add(jsonEncode({
-          "type": "action", 
-          "action": "settings.set", 
-          "payload": {"type": "bool", "category": "Map", "name": "Auto catch all", "value": false}
-        }));
-      } catch (_) {}
+      _setEngineAutoCatch(false);
       return;
     }
 
@@ -275,78 +325,84 @@ Future<void> _triggerStateLogic(ServiceInstance service, SharedPreferences prefs
       return;
     }
     
+    // 2. Select Next Point
     final nextPoint = _routePoints[_currentRouteIdx];
-
-    // ── Ping-Pong Indexing Logic ──
-    if (!_isReversing) {
-      if (_currentRouteIdx < _routePoints.length - 1) {
-        _currentRouteIdx++;
-      } else {
-        _isReversing = true;
-        _currentRouteIdx--;
-      }
-    } else {
-      if (_currentRouteIdx > 0) {
-        _currentRouteIdx--;
-      } else {
-        _isReversing = false;
-        _currentRouteIdx++;
-      }
-    }
-
-    final cooldownSec = (nextPoint['cooldown'] as num?)?.toDouble() ?? 0.0;
     final lat = nextPoint['lat'] as double;
     final lng = nextPoint['lng'] as double;
 
-    _log(service, '⚡ Jumping to $lat, $lng');
-    
-    try {
-      _wsChannel?.sink.add(jsonEncode({
-        'type': 'action',
-        'action': 'location.set',
-        'requestId': DateTime.now().millisecondsSinceEpoch.toString(),
-        'payload': {'lat': lat, 'lng': lng}
-      }));
-      
-      _wsChannel?.sink.add(jsonEncode({
-        "type": "action", 
-        "action": "settings.set", 
-        "payload": {"type": "bool", "category": "Map", "name": "Auto catch all", "value": false}
-      }));
-    } catch (e) {
-      _log(service, 'Failed to send jump commands: $e');
+    // 3. Teleport
+    _log(service, '🚀 Teleporting to $lat, $lng');
+    _setEngineLocation(lat, lng);
+    _setEngineAutoCatch(false); // Disarm before arriving
+
+    // 4. Advance Index (Ping-Pong)
+    if (!_isReversing) {
+      if (_currentRouteIdx < _routePoints.length - 1) _currentRouteIdx++;
+      else { _isReversing = true; _currentRouteIdx--; }
+    } else {
+      if (_currentRouteIdx > 0) _currentRouteIdx--;
+      else { _isReversing = false; _currentRouteIdx++; }
     }
 
-    _transitionTo(service, EngineState.SpeedLockWait, cooldownSec);
-    await Future.delayed(Duration(milliseconds: (cooldownSec * 1000).toInt()));
-    
-    if (_currentState == EngineState.Idle) return;
-
-    try {
-      _wsChannel?.sink.add(jsonEncode({
-        "type": "action", 
-        "action": "settings.set", 
-        "payload": {"type": "bool", "category": "Map", "name": "Auto catch all", "value": true}
-      }));
-    } catch (_) {}
-    
+    // 5. Arm & Wait for Catch
     _transitionTo(service, EngineState.Harvesting);
+    await Future.delayed(const Duration(seconds: 3)); // Wait for spawns to load
+    _setEngineAutoCatch(true); // Arm the engine
+
+    _log(service, '🎯 Armed & Harvesting at new location...');
     
+    // Failsafe timer (if no catch happens in 45s, skip)
     _harvestTimer?.cancel();
     _harvestTimer = Timer(const Duration(seconds: 45), () {
       if (_currentState == EngineState.Harvesting) {
-        _log(service, 'Harvest Failsafe triggered. Forcing jump.');
-        _transitionTo(service, EngineState.Jumping);
-        _triggerStateLogic(service, prefs);
+        _log(service, '⚠️ Harvest Failsafe triggered (No catch). Jumping next.');
+        _finishCatchAndCoolDown(service, nextPoint, true);
       }
     });
-    
-    if (_activeEncounters.isEmpty) {
-      _harvestTimer?.cancel();
-      _transitionTo(service, EngineState.Jumping);
-      _triggerStateLogic(service, prefs);
-    }
   }
+}
+
+Future<void> _finishCatchAndCoolDown(ServiceInstance service, Map<String, dynamic> point, bool wasFailsafe) async {
+  _harvestTimer?.cancel();
+  
+  // 1. Disarm immediately to prevent speed-lock catches
+  _setEngineAutoCatch(false);
+  
+  if (!wasFailsafe) {
+    _log(service, '✅ Catch confirmed. Initiating dynamic cooldown...');
+    RouteDatabase.instance.insertCatch(_activeUsername, DateTime.now().millisecondsSinceEpoch);
+  }
+
+  // 2. Cooldown calculation
+  final cooldownSec = (point['cooldown'] as num?)?.toDouble() ?? 0.0;
+  
+  if (cooldownSec > 0) {
+    _transitionTo(service, EngineState.SpeedLockWait, cooldownSec);
+    _log(service, '⏳ Cooling down for ${cooldownSec.toStringAsFixed(1)}s...');
+    await Future.delayed(Duration(milliseconds: (cooldownSec * 1000).toInt()));
+  }
+
+  // 3. Loop back
+  _transitionTo(service, EngineState.Jumping);
+  final prefs = await SharedPreferences.getInstance();
+  _triggerStateLogic(service, prefs);
+}
+
+void _setEngineLocation(double lat, double lng) {
+  _wsChannel?.sink.add(jsonEncode({
+    'type': 'action',
+    'action': 'location.set',
+    'requestId': DateTime.now().millisecondsSinceEpoch.toString(),
+    'payload': {'lat': lat, 'lng': lng}
+  }));
+}
+
+void _setEngineAutoCatch(bool enabled) {
+  _wsChannel?.sink.add(jsonEncode({
+    "type": "action", 
+    "action": "settings.set", 
+    "payload": {"type": "bool", "category": "Map", "name": "Auto catch all", "value": enabled}
+  }));
 }
 
 // ── Auto-Revive Logic ────────────────────────────────────────────────────────
@@ -369,7 +425,19 @@ Future<void> _startAutoRevivePingLoop(ServiceInstance service) async {
       
       if (response.statusCode == 200) {
         timer.cancel();
-        _log(service, '[Auto-Revive] Server detected. Reconnecting...');
+        _log(service, '[Auto-Revive] Server detected. Stabilizing (5s)...');
+        
+        // Wait for game to finish booting internal modules
+        await Future.delayed(const Duration(seconds: 5));
+        
+        final configJson = prefs.getString('zygarde_full_config');
+        if (configJson != null) {
+          _log(service, '[Auto-Revive] Pushing Latch Settings...');
+          try {
+            _pushAllSettingsToEngine(jsonDecode(configJson), service);
+          } catch (_) {}
+        }
+        
         _startStateMachine(service);
       } else {
         throw Exception();
@@ -386,13 +454,12 @@ Future<void> _startAutoRevivePingLoop(ServiceInstance service) async {
           await Process.run('su', ['-c', 'am force-stop com.nianticlabs.pokemongo']);
         } catch (_) {}
 
+        // Launch via monkey (foolproof for root)
         try {
-          const intent = AndroidIntent(
-            action: 'android.intent.action.MAIN',
-            package: 'com.nianticlabs.pokemongo',
-            flags: <int>[Flag.FLAG_ACTIVITY_NEW_TASK],
-          );
-          await intent.launch();
+          await Process.run('su', [
+            '-c', 
+            'monkey -p com.nianticlabs.pokemongo -c android.intent.category.LAUNCHER 1'
+          ]);
         } catch (_) {}
       }
     }
@@ -480,6 +547,7 @@ Future<void> _discardViaWebSocket(
 String _ts() => '${DateTime.now().hour.toString().padLeft(2,'0')}:${DateTime.now().minute.toString().padLeft(2,'0')}:${DateTime.now().second.toString().padLeft(2,'0')}';
 
 Future<void> _log(ServiceInstance service, String msg) async {
+  print('[SOVEREIGN] 🦖 $msg');
   final prefs   = await SharedPreferences.getInstance();
   final existing = prefs.getString(_kLogKey) ?? '';
   final lines    = existing.isEmpty ? <String>[] : existing.split('\n');
@@ -508,8 +576,110 @@ Future<void> _showLimitNotification(int limit) async {
   );
 }
 
+Future<void> _pushAllSettingsToEngine(Map<String, dynamic> config, ServiceInstance service) async {
+  final prefs = await SharedPreferences.getInstance();
+  final rawUrl = prefs.getString(_kBaseUrlKey) ?? _kDefaultBase;
+  
+  _log(service, '🦖 [SYNC-LATCH] Waiting for Engine: $rawUrl');
+
+  final List<String> hosts = ['localhost', '127.0.0.1'];
+  final port = Uri.parse(rawUrl).port != 0 ? Uri.parse(rawUrl).port : 8080;
+
+  bool success = false;
+  int attempts = 0;
+  const int maxAttempts = 30; // 30 * 2 seconds = 60 seconds timeout
+
+  while (!success && attempts < maxAttempts) {
+    attempts++;
+    
+    for (String host in hosts) {
+      if (success) break;
+      
+      final httpUrl = 'http://$host:$port/ping'; 
+      final wsUrl   = 'ws://$host:$port/ws';
+
+      try {
+        // Pre-flight check via HTTP
+        await http.get(Uri.parse(httpUrl)).timeout(const Duration(seconds: 1));
+        
+        // If we reach here, port is open!
+        _log(service, '✅ 🦖 Engine detected on attempt $attempts ($host)');
+        _log(service, '🔌 🦖 Syncing settings to $wsUrl...');
+        
+        final channel = WebSocketChannel.connect(Uri.parse(wsUrl));
+        
+        final List<Map<String, dynamic>> mapping = [
+          {"cat": "Bag manager", "name": "Auto transfer", "type": "bool", "key": "autoTransfer"},
+          {"cat": "Catch Assist", "name": "Quick catch", "type": "bool", "key": "quickCatch"},
+          {"cat": "Catch Assist", "name": "Never miss", "type": "bool", "key": "neverMiss"},
+          {"cat": "Catch Assist", "name": "Force curve", "type": "bool", "key": "forceCurve"},
+          {"cat": "Catch Assist", "name": "Force throw type", "type": "bool", "key": "forceThrowType"},
+          {"cat": "Catch Assist", "name": "Throw type", "type": "combo", "key": "throwType"},
+          {"cat": "Cutscenes", "name": "Skip cutscenes", "type": "bool", "key": "skipCutscenes"},
+          {"cat": "Map", "name": "Auto catch all", "type": "bool", "key": "autoCatchAll"},
+          {"cat": "Map", "name": "Fast load", "type": "bool", "key": "fastLoad"},
+          {"cat": "Pokestops", "name": "Auto spin Pokestops", "type": "bool", "key": "autoSpinPokestops"},
+          {"cat": "Pokestops", "name": "Auto spin Gyms", "type": "bool", "key": "autoSpinGyms"},
+          {"cat": "Spoofing", "name": "Location spoofing", "type": "bool", "key": "locationSpoofing"},
+        ];
+
+        int pushed = 0;
+        for (var item in mapping) {
+          if (config.containsKey(item['key'])) {
+            channel.sink.add(jsonEncode({
+              "type": "action",
+              "action": "settings.set",
+              "payload": {
+                "category": item['cat'],
+                "name": item['name'],
+                "type": item['type'],
+                "value": config[item['key']]
+              }
+            }));
+            pushed++;
+            await Future.delayed(const Duration(milliseconds: 50));
+          }
+        }
+        
+        await channel.sink.close();
+        _log(service, '🚀 🦖 Sync Complete! Pushed $pushed settings.');
+        success = true;
+      } catch (e) {
+        // Just fail silently and retry next cycle
+      }
+    }
+
+    if (!success) {
+      if (attempts % 5 == 0) {
+        _log(service, '⏳ 🦖 Still waiting for engine... (Attempt $attempts/30)');
+      }
+      await Future.delayed(const Duration(seconds: 2));
+    }
+  }
+
+  if (!success) {
+    _log(service, '❌ 🦖 TIMEOUT: Engine never became reachable after 60s.');
+  }
+}
+
 Future<void> initBagService() async {
   final service = FlutterBackgroundService();
+
+  // Android 12+ requires a valid notification channel to be created before startForeground
+  const AndroidNotificationChannel channel = AndroidNotificationChannel(
+    'sovereign_bag_channel', // id
+    'Sovereign Sentinel Service', // name
+    description: 'Background service for the Sovereign Mobile Warden daemon.', // description
+    importance: Importance.low, // low to avoid annoying sound/vibration for persistent notification
+  );
+
+  final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
+      FlutterLocalNotificationsPlugin();
+
+  await flutterLocalNotificationsPlugin
+      .resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>()
+      ?.createNotificationChannel(channel);
 
   await service.configure(
     androidConfiguration: AndroidConfiguration(

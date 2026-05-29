@@ -10,15 +10,19 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_staggered_animations/flutter_staggered_animations.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../constants.dart';
 import '../theme/sovereign_theme.dart';
+import '../models/zygarde_config.dart';
+import 'zygarde_dashboard_cards.dart';
 
 // ── Item model ────────────────────────────────────────────────────────────────
 class _ItemEntry {
@@ -79,6 +83,12 @@ class BagLogicScreen extends StatefulWidget {
 
 class _BagLogicScreenState extends State<BagLogicScreen>
     with AutomaticKeepAliveClientMixin {
+  bool _isServiceRunning = false;
+  
+  // Zygarde Settings State
+  ZygardeConfig _zygardeConfig = ZygardeConfig();
+  bool _isSyncing      = false;
+
   @override
   bool get wantKeepAlive => true;
 
@@ -131,6 +141,11 @@ class _BagLogicScreenState extends State<BagLogicScreen>
 
     Map<String, dynamic> saved = {};
     try { saved = jsonDecode(raw) as Map<String, dynamic>; } catch (_) {}
+
+    final zygardeJson = prefs.getString('zygarde_config_json');
+    if (zygardeJson != null) {
+      try { _zygardeConfig = ZygardeConfig.fromJson(jsonDecode(zygardeJson)); } catch (_) {}
+    }
 
     setState(() {
       _catchLimitCtrl.text = '$catchLimit';
@@ -194,16 +209,27 @@ class _BagLogicScreenState extends State<BagLogicScreen>
     await prefs.setString('zygarde_base_url', _baseUrl);
     await prefs.setInt('daily_catch_limit', catchLimit);
 
+    await prefs.setString('zygarde_config_json', jsonEncode(_zygardeConfig.toJson()));
+
     // Push to background service
     FlutterBackgroundService().invoke('updateConfig', {
       'limits' : limits,
       'baseUrl': _baseUrl,
       'catchLimit': catchLimit,
+      'zygardeConfig': _zygardeConfig.toJson(),
     });
+
+    // --- NEW: Launch Pokémon GO via SU ---
+    try {
+      setState(() => _logs.add('[${_ts()}] 🚀 Launching Pokémon GO...'));
+      await Process.run('su', ['-c', 'monkey -p com.nianticlabs.pokemongo 1']);
+    } catch (e) {
+      setState(() => _logs.add('[${_ts()}] ✗ Launch Error: $e'));
+    }
 
     setState(() {
       _saving = false;
-      _logs.add('[${_ts()}] ✓ Config saved & sent to daemon.');
+      _logs.add('[${_ts()}] ✓ Config saved & Game launched.');
       if (_logs.length > 50) _logs.removeAt(0);
     });
     _scrollLog();
@@ -216,9 +242,9 @@ class _BagLogicScreenState extends State<BagLogicScreen>
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
           content: const Row(
             children: [
-              Icon(Icons.check_circle_outline, color: Colors.white, size: 18),
+              Icon(Icons.rocket_launch_rounded, color: Colors.white, size: 18),
               SizedBox(width: 10),
-              Text('Limits saved & daemon updated', style: TextStyle(color: Colors.white)),
+              Text('Sync Complete - Game Launched!', style: TextStyle(color: Colors.white)),
             ],
           ),
         ),
@@ -230,6 +256,35 @@ class _BagLogicScreenState extends State<BagLogicScreen>
     setState(() => _running = true);
     FlutterBackgroundService().invoke('runNow');
     _logs.add('[${_ts()}] ⚡ Manual cycle triggered…');
+    _scrollLog();
+  }
+
+  Future<void> _fixPermissions() async {
+    setState(() => _logs.add('[${_ts()}] 🛠 Fixing App Permissions via SU...'));
+    final pkg = 'com.sovereign.mobile';
+    final perms = [
+      'android.permission.ACCESS_FINE_LOCATION',
+      'android.permission.ACCESS_COARSE_LOCATION',
+      'android.permission.READ_EXTERNAL_STORAGE',
+      'android.permission.WRITE_EXTERNAL_STORAGE',
+    ];
+
+    try {
+      // Standard grants
+      for (final p in perms) {
+        await Process.run('su', ['-c', 'pm grant $pkg $p']);
+      }
+      
+      // Post Notifications for Android 13+
+      await Process.run('su', ['-c', 'pm grant $pkg android.permission.POST_NOTIFICATIONS']);
+      
+      // Special: System Alert Window (Overlay)
+      await Process.run('su', ['-c', 'appops set $pkg SYSTEM_ALERT_WINDOW allow']);
+      
+      setState(() => _logs.add('[${_ts()}] ✓ Permissions Granted via SU.'));
+    } catch (e) {
+      setState(() => _logs.add('[${_ts()}] ✗ Permission Error: $e'));
+    }
     _scrollLog();
   }
 
@@ -288,7 +343,7 @@ class _BagLogicScreenState extends State<BagLogicScreen>
     final categories = grouped.keys.toList();
 
     return Container(
-      decoration: const BoxDecoration(gradient: SovereignTheme.bgGradient),
+      decoration: BoxDecoration(gradient: SovereignTheme.bgGradient),
       child: Column(
         children: [
           // ── Header bar ──
@@ -302,7 +357,7 @@ class _BagLogicScreenState extends State<BagLogicScreen>
                 itemCount: categories.length + 1, // +1 for the Catch Limit card
                 itemBuilder: (ctx, idx) {
                   if (idx == 0) {
-                    return _buildWardenSettings();
+                    return _buildDashboard();
                   }
                   
                   final catIdx = idx - 1;
@@ -380,52 +435,131 @@ class _BagLogicScreenState extends State<BagLogicScreen>
     );
   }
 
-  Widget _buildWardenSettings() {
-    return Padding(
-      padding: const EdgeInsets.only(top: 12, bottom: 8),
-      child: GlassCard(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-        borderRadius: 12,
-        child: Row(
-          children: [
-            const Icon(Icons.shield_rounded, color: SovereignTheme.accentCyan, size: 24),
-            const SizedBox(width: 16),
-            const Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('DAILY CATCH LIMIT',
-                      style: TextStyle(
-                          color: SovereignTheme.textPrimary,
-                          fontWeight: FontWeight.w700,
-                          fontSize: 12)),
-                  Text('Warden Killswitch Trigger',
-                      style: TextStyle(color: SovereignTheme.textMuted, fontSize: 10)),
-                ],
-              ),
-            ),
-            SizedBox(
-              width: 90,
-              height: 48,
-              child: TextField(
-                controller: _catchLimitCtrl,
-                keyboardType: TextInputType.number,
-                textAlign: TextAlign.center,
-                style: const TextStyle(
-                  color: SovereignTheme.accentCyan,
-                  fontWeight: FontWeight.bold,
-                  fontSize: 18,
+  Widget _buildDashboard() {
+    return Column(
+      children: [
+        CatchingCard(config: _zygardeConfig, onChanged: (c) => setState(() => _zygardeConfig = c)),
+        BuddyCard(config: _zygardeConfig, onChanged: (c) => setState(() => _zygardeConfig = c)),
+        AutomationCard(config: _zygardeConfig, onChanged: (c) => setState(() => _zygardeConfig = c)),
+        VisualsCard(config: _zygardeConfig, onChanged: (c) => setState(() => _zygardeConfig = c)),
+        PrivacyCard(config: _zygardeConfig, onChanged: (c) => setState(() => _zygardeConfig = c)),
+        TechnicalCard(config: _zygardeConfig, onChanged: (c) => setState(() => _zygardeConfig = c)),
+        
+        const SizedBox(height: 16),
+        _buildWardenCard(),
+        const SizedBox(height: 16),
+      ],
+    );
+  }
+
+
+  Widget _buildWardenCard() {
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(top: 12, bottom: 8),
+          child: GlassCard(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+            borderRadius: 12,
+            child: Row(
+              children: [
+                const Icon(Icons.shield_rounded, color: SovereignTheme.accentCyan, size: 24),
+                const SizedBox(width: 16),
+                const Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('DAILY CATCH LIMIT',
+                          style: TextStyle(
+                              color: SovereignTheme.textPrimary,
+                              fontWeight: FontWeight.w700,
+                              fontSize: 12)),
+                      Text('Warden Killswitch Trigger',
+                          style: TextStyle(color: SovereignTheme.textMuted, fontSize: 10)),
+                    ],
+                  ),
                 ),
-                decoration: const InputDecoration(
-                  contentPadding: EdgeInsets.symmetric(vertical: 12),
-                  hintText: '4500',
-                  hintStyle: TextStyle(color: SovereignTheme.textMuted),
+                SizedBox(
+                  width: 90,
+                  height: 48,
+                  child: TextField(
+                    controller: _catchLimitCtrl,
+                    keyboardType: TextInputType.number,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      color: SovereignTheme.accentCyan,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 18,
+                    ),
+                    decoration: const InputDecoration(
+                      contentPadding: EdgeInsets.symmetric(vertical: 12),
+                      hintText: '4500',
+                      hintStyle: TextStyle(color: SovereignTheme.textMuted),
+                    ),
+                  ),
                 ),
-              ),
+              ],
             ),
-          ],
+          ),
         ),
-      ),
+        // Manual Root Request
+        GestureDetector(
+          onTap: () async {
+            setState(() => _logs.add('[${_ts()}] 🔐 Requesting Root Access...'));
+            try {
+              final result = await Process.run('su', ['-c', 'id']);
+              if (result.exitCode == 0) {
+                setState(() => _logs.add('[${_ts()}] ✓ Root Access Granted: ${result.stdout.toString().trim()}'));
+              } else {
+                setState(() => _logs.add('[${_ts()}] ✗ Root Denied: ${result.stderr}'));
+              }
+            } catch (e) {
+              setState(() => _logs.add('[${_ts()}] ✗ Root Error: $e'));
+            }
+            _scrollLog();
+          },
+          child: Container(
+            margin: const EdgeInsets.only(bottom: 8),
+            padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 16),
+            decoration: BoxDecoration(
+              color: Colors.white.withOpacity(0.05),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: Colors.white.withOpacity(0.1)),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: const [
+                Icon(Icons.security_rounded, color: Colors.white54, size: 16),
+                SizedBox(width: 8),
+                Text('MANUALLY REQUEST ROOT (SU)', 
+                  style: TextStyle(color: Colors.white54, fontSize: 11, fontWeight: FontWeight.bold, letterSpacing: 1)),
+              ],
+            ),
+          ),
+        ),
+        // Fix Permissions
+        GestureDetector(
+          onTap: _fixPermissions,
+          child: Container(
+            margin: const EdgeInsets.only(bottom: 12),
+            padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 16),
+            decoration: BoxDecoration(
+              color: SovereignTheme.accentCyan.withOpacity(0.1),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: SovereignTheme.accentCyan.withOpacity(0.3)),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: const [
+                Icon(Icons.build_circle_rounded, color: SovereignTheme.accentCyan, size: 16),
+                SizedBox(width: 8),
+                Text('AUTO-GRANT ALL PERMISSIONS (SU)', 
+                  style: TextStyle(color: SovereignTheme.accentCyan, fontSize: 11, fontWeight: FontWeight.bold, letterSpacing: 1)),
+              ],
+            ),
+          ),
+        ),
+      ],
     );
   }
 
@@ -492,7 +626,7 @@ class _BagLogicScreenState extends State<BagLogicScreen>
     return Container(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
       decoration: BoxDecoration(
-        color: SovereignTheme.bgDeep,
+        color: SovereignTheme.currentBg,
         border: const Border(top: BorderSide(color: SovereignTheme.glassBorder)),
       ),
       child: Row(
@@ -521,6 +655,21 @@ class _BagLogicScreenState extends State<BagLogicScreen>
         ],
       ),
     );
+  }
+
+
+
+  Future<void> _syncZygardeSettings() async {
+    setState(() => _isSyncing = true);
+    FlutterBackgroundService().invoke('syncZygarde', _zygardeConfig.toJson());
+
+    await Future.delayed(const Duration(seconds: 1));
+    if (mounted) {
+      setState(() => _isSyncing = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Settings sent to Zygarde engine!')),
+      );
+    }
   }
 }
 

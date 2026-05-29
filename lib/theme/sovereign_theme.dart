@@ -7,7 +7,13 @@ import 'package:google_fonts/google_fonts.dart';
 class SovereignTheme {
   // ── Color palette ──────────────────────────────────────────────────────────
   static const Color bgDeep      = Color(0xFF07071A);
+  static const Color bgDeepGhost = Color(0xFF000000); // True Black
   static const Color bgLayer     = Color(0xFF0D0D2B);
+  
+  static bool isGhostMode = false;
+
+  static Color get currentBg => isGhostMode ? bgDeepGhost : bgDeep;
+
   static const Color accentViolet= Color(0xFF7C3AED);
   static const Color accentCyan  = Color(0xFF06B6D4);
   static const Color glassWhite  = Color(0x0DFFFFFF);   // 5% white
@@ -18,10 +24,10 @@ class SovereignTheme {
   static const Color danger      = Color(0xFFEF4444);
 
   // ── Gradient ───────────────────────────────────────────────────────────────
-  static const LinearGradient bgGradient = LinearGradient(
+  static LinearGradient get bgGradient => LinearGradient(
     begin: Alignment.topLeft,
     end: Alignment.bottomRight,
-    colors: [bgDeep, Color(0xFF0F0527), bgDeep],
+    colors: [currentBg, isGhostMode ? Colors.black : const Color(0xFF0F0527), currentBg],
   );
 
   static const LinearGradient accentGradient = LinearGradient(
@@ -31,7 +37,7 @@ class SovereignTheme {
   // ── ThemeData ──────────────────────────────────────────────────────────────
   static ThemeData get theme => ThemeData(
     brightness: Brightness.dark,
-    scaffoldBackgroundColor: bgDeep,
+    scaffoldBackgroundColor: currentBg,
     colorScheme: const ColorScheme.dark(
       primary     : accentViolet,
       secondary   : accentCyan,
@@ -58,7 +64,7 @@ class SovereignTheme {
       ),
       iconTheme: const IconThemeData(color: textPrimary),
     ),
-    tabBarTheme: TabBarTheme(
+    tabBarTheme: TabBarThemeData(
       labelColor        : Colors.white,
       unselectedLabelColor: textMuted,
       indicator: const UnderlineTabIndicator(
